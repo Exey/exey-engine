@@ -1,0 +1,16 @@
+[package]
+name = "isometric-world-generator"
+version = "0.1.0"
+description = "Demo for ExeyEngine — random isometric world generation, save/load as Tiled .tmx, A* pathfinding."
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+authors.workspace = true
+
+[dependencies]
+exey-engine = { path = "../exey-engine" }
+winit.workspace = true
+anyhow.workspace = true
+log.workspace = true
+env_logger.workspace = true
+glam.workspace = true

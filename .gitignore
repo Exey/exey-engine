@@ -1,0 +1,8 @@
+/target
+**/*.rs.bk
+Cargo.lock
+
+# Asset binaries — license-protected, must be downloaded by the user
+isometric-world-generator/assets/*
+!isometric-world-generator/assets/README.md
+!isometric-world-generator/assets/.gitkeep
