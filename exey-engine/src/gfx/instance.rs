@@ -41,7 +41,16 @@ pub struct Instance {
 /// subset extension on macOS (MoltenVK). Below this version the portability
 /// flags must NOT be passed; at or above this version they are required.
 /// We hard-code the threshold the vulkanalia tutorial uses.
-const PORTABILITY_MACOS_VERSION: u32 = vk::make_version(1, 3, 216);
+///
+/// Note: vulkanalia 0.35 represents the SDK version as a structured
+/// `vulkanalia::Version`, not the packed `u32` that `vk::make_version`
+/// returns — the entry's `.version()` getter speaks the structured type, so
+/// we declare the threshold the same way to compare cleanly.
+const PORTABILITY_MACOS_VERSION: vulkanalia::Version = vulkanalia::Version {
+    major: 1,
+    minor: 3,
+    patch: 216,
+};
 
 impl Instance {
     pub fn new(window: &Window, app_name: &str) -> Result<Self> {
@@ -68,13 +77,18 @@ impl Instance {
         // must add VK_KHR_portability_enumeration to the instance and pass
         // the ENUMERATE_PORTABILITY_KHR flag. On other platforms this branch
         // is dead code.
-        let entry_version = entry.version().unwrap_or(vk::make_version(1, 0, 0));
+        //
+        // `entry.version()` returns a `vulkanalia::Version`. On a driver too
+        // old to support `vkEnumerateInstanceVersion` it errors; falling
+        // back to `Version::default()` (1.0.?) is correct because that's
+        // strictly below 1.3.216 and the macOS branch will skip.
+        let entry_version = entry.version().unwrap_or_default();
         let portability_required =
             cfg!(target_os = "macos") && entry_version >= PORTABILITY_MACOS_VERSION;
         if portability_required {
             extensions.push(vk::KHR_PORTABILITY_ENUMERATION_EXTENSION.name.as_ptr());
             // Also required by some MoltenVK builds for device feature queries.
-            extensions.push(vk::KHR_GET_PHYSICAL_DEVICE_PROPERTIES_2_EXTENSION.name.as_ptr());
+            extensions.push(vk::KHR_GET_PHYSICAL_DEVICE_PROPERTIES2_EXTENSION.name.as_ptr());
         }
 
         // Step 3 — collect requested layers. Validation layer is opt-in.

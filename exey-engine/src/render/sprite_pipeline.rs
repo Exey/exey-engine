@@ -407,6 +407,11 @@ fn create_pipeline(
             .subpass(0)
             .push_next(&mut rendering_info);
 
+        // vulkanalia 0.35: `create_graphics_pipelines` returns
+        // `VkSuccessResult<Vec<Pipeline>>` — that is, on success a tuple
+        // `(Vec<Pipeline>, SuccessCode)` and on error a plain `ErrorCode`.
+        // We discard the success code and check the Vec is non-empty before
+        // indexing.
         let (pipelines, _success) = unsafe {
             device.logical.create_graphics_pipelines(
                 vk::PipelineCache::null(),
@@ -414,8 +419,11 @@ fn create_pipeline(
                 None,
             )
         }
-        .map_err(|(_, e)| anyhow::anyhow!("vkCreateGraphicsPipelines failed: {e}"))?;
-        Ok(pipelines[0])
+        .map_err(|e| anyhow::anyhow!("vkCreateGraphicsPipelines failed: {e}"))?;
+        pipelines
+            .first()
+            .copied()
+            .ok_or_else(|| anyhow::anyhow!("vkCreateGraphicsPipelines returned 0 pipelines"))
     })();
 
     unsafe {
