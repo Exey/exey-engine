@@ -1,7 +1,7 @@
 //! Frame timing — delta seconds and a rolling FPS counter.
 //!
 //! The original engine kept its own `getDelta()` and stats counter on
-//! `RCatEngineCore`; we factor that out into a small struct so the demo
+//! `ExeyEngineCore`; we factor that out into a small struct so the demo
 //! can render its own FPS overlay (a requirement) without poking into
 //! engine internals.
 

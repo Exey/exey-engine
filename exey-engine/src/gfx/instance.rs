@@ -13,8 +13,7 @@ use vulkanalia::prelude::v1_0::*;
 // device-level halves. We need the instance-level halves of both KHR_surface
 // (for destroy_surface_khr, get_physical_device_surface_*_khr) and
 // EXT_debug_utils (for create/destroy_debug_utils_messenger_ext).
-use vulkanalia::vk::{ExtDebugUtilsExtensionInstanceCommands, 
-    KhrSurfaceExtensionInstanceCommands};
+use vulkanalia::vk::{ExtDebugUtilsExtensionInstanceCommands, KhrSurfaceExtensionInstanceCommands};
 use vulkanalia::window as vk_window;
 use winit::window::Window;
 
@@ -38,6 +37,12 @@ pub struct Instance {
     debug_messenger: Option<vk::DebugUtilsMessengerEXT>,
 }
 
+/// The minimum Vulkan SDK version that started requiring the portability
+/// subset extension on macOS (MoltenVK). Below this version the portability
+/// flags must NOT be passed; at or above this version they are required.
+/// We hard-code the threshold the vulkanalia tutorial uses.
+const PORTABILITY_MACOS_VERSION: u32 = vk::make_version(1, 3, 216);
+
 impl Instance {
     pub fn new(window: &Window, app_name: &str) -> Result<Self> {
         // Step 1 — load libvulkan dynamically.
@@ -56,6 +61,20 @@ impl Instance {
             .collect::<Vec<_>>();
         if VALIDATION_ENABLED {
             extensions.push(vk::EXT_DEBUG_UTILS_EXTENSION.name.as_ptr());
+        }
+
+        // macOS portability: from Vulkan SDK 1.3.216 onward MoltenVK is treated
+        // as a non-conformant ("portability") implementation. To use it we
+        // must add VK_KHR_portability_enumeration to the instance and pass
+        // the ENUMERATE_PORTABILITY_KHR flag. On other platforms this branch
+        // is dead code.
+        let entry_version = entry.version().unwrap_or(vk::make_version(1, 0, 0));
+        let portability_required =
+            cfg!(target_os = "macos") && entry_version >= PORTABILITY_MACOS_VERSION;
+        if portability_required {
+            extensions.push(vk::KHR_PORTABILITY_ENUMERATION_EXTENSION.name.as_ptr());
+            // Also required by some MoltenVK builds for device feature queries.
+            extensions.push(vk::KHR_GET_PHYSICAL_DEVICE_PROPERTIES_2_EXTENSION.name.as_ptr());
         }
 
         // Step 3 — collect requested layers. Validation layer is opt-in.
@@ -78,17 +97,6 @@ impl Instance {
         // Step 4 — application info. Vulkan 1.3 because we use dynamic rendering.
         let app_name_c = std::ffi::CString::new(app_name)?;
         let engine_name_c = std::ffi::CString::new("ExeyEngine")?;
-
-        // Build extensions list dynamically
-        let mut extensions = vec![
-            vk::KHR_SURFACE_EXTENSION.name.as_ptr(),
-            vk::EXT_METAL_SURFACE_EXTENSION.name.as_ptr(),
-        ];
-
-        if cfg!(target_os = "macos") {
-            extensions.push(vk::KHR_PORTABILITY_ENUMERATION_EXTENSION.name.as_ptr());
-        }
-
         let app_info = vk::ApplicationInfo::builder()
             .application_name(app_name_c.as_bytes_with_nul())
             .application_version(vk::make_version(0, 1, 0))
@@ -96,19 +104,20 @@ impl Instance {
             .engine_version(vk::make_version(0, 1, 0))
             .api_version(vk::make_version(1, 3, 0));
 
-        let mut flags = vk::InstanceCreateFlags::empty();
-        if cfg!(target_os = "macos") {
-            flags |= vk::InstanceCreateFlags::ENUMERATE_PORTABILITY_KHR;
-        }
+        let flags = if portability_required {
+            vk::InstanceCreateFlags::ENUMERATE_PORTABILITY_KHR
+        } else {
+            vk::InstanceCreateFlags::empty()
+        };
 
         let info = vk::InstanceCreateInfo::builder()
             .application_info(&app_info)
-            .enabled_layer_names(&[])   // no layers
             .enabled_extension_names(&extensions)
+            .enabled_layer_names(&layers)
             .flags(flags);
 
         let instance = unsafe { entry.create_instance(&info, None) }
-            .context("vkCreateInstance failed")?;
+            .context("vkCreateInstance failed — is the Vulkan loader installed?")?;
 
         // Step 5 — debug messenger (validation output -> log crate).
         let debug_messenger = if VALIDATION_ENABLED && !layers.is_empty() {

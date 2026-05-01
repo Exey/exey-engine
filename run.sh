@@ -49,6 +49,27 @@ if [ ! -d "$ASSETS_DIR" ] || [ -z "$(ls -A "$ASSETS_DIR" 2>/dev/null | grep -v '
 fi
 
 cd "$ROOT"
+
+# macOS / MoltenVK: Vulkan isn't system-installed; we need to point the loader
+# at Homebrew's libvulkan.dylib (vulkan-loader) and at MoltenVK's ICD JSON.
+# This auto-config means `./run.sh` Just Works once `brew install vulkan-loader
+# molten-vk vulkan-tools` has been done. Users with a full LunarG SDK already
+# in their environment (VULKAN_SDK set) are left alone.
+if [[ "$(uname)" == "Darwin" && -z "${VULKAN_SDK:-}" ]]; then
+  BREW_PREFIX="$(brew --prefix 2>/dev/null || echo /opt/homebrew)"
+  : "${DYLD_FALLBACK_LIBRARY_PATH:=}"
+  export DYLD_FALLBACK_LIBRARY_PATH="$BREW_PREFIX/lib:$DYLD_FALLBACK_LIBRARY_PATH"
+  if [[ -z "${VK_ICD_FILENAMES:-}" ]]; then
+    if   [[ -f "$BREW_PREFIX/etc/vulkan/icd.d/MoltenVK_icd.json" ]]; then
+      export VK_ICD_FILENAMES="$BREW_PREFIX/etc/vulkan/icd.d/MoltenVK_icd.json"
+    elif [[ -f "$BREW_PREFIX/share/vulkan/icd.d/MoltenVK_icd.json" ]]; then
+      export VK_ICD_FILENAMES="$BREW_PREFIX/share/vulkan/icd.d/MoltenVK_icd.json"
+    fi
+  fi
+  echo "[run.sh] macOS: DYLD_FALLBACK_LIBRARY_PATH=$DYLD_FALLBACK_LIBRARY_PATH"
+  echo "[run.sh] macOS: VK_ICD_FILENAMES=${VK_ICD_FILENAMES:-<unset>}"
+fi
+
 echo "[run.sh] building ($PROFILE_FLAG)…"
 cargo build $PROFILE_FLAG -p isometric-world-generator
 

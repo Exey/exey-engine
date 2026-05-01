@@ -8,7 +8,7 @@ use anyhow::Result;
 use winit::window::Window;
 
 use crate::gfx::{self, Device, Instance, Swapchain, frame::AcquireResult};
-use crate::render::{RenderCore, RendererKind};
+use crate::render::{RenderCore, RendererKind, Sprite};
 
 #[derive(Clone, Debug)]
 pub struct EngineConfig {
@@ -45,7 +45,7 @@ impl Engine {
         let size = window.inner_size();
         let swapchain = Swapchain::new(&instance, &device, (size.width, size.height))?;
         let frames = gfx::FramesInFlight::new(&device)?;
-        let render = RenderCore::new(config.renderer, &device)?;
+        let render = RenderCore::new(config.renderer, &device, &swapchain)?;
         Ok(Self {
             render,
             frames,
@@ -63,7 +63,10 @@ impl Engine {
         self.needs_recreate = true;
     }
 
-    pub fn draw_frame(&mut self, window: &Window) -> Result<()> {
+    /// Draw one frame. `sprites` is the list to render this frame —
+    /// the demo owns the sprite resources and passes them in by reference.
+    /// Empty slice = clear-only frame (the M1 behaviour).
+    pub fn draw_frame(&mut self, window: &Window, sprites: &[&Sprite]) -> Result<()> {
         let size = window.inner_size();
         if size.width == 0 || size.height == 0 {
             // Minimized — skip the frame entirely. Trying to acquire here
@@ -84,18 +87,32 @@ impl Engine {
             }
         };
 
-        // Build per-frame batch (just clear color in M1) and call into the
-        // selected renderer. The renderer no-ops in M1; the actual clear is
-        // performed by `record_clear`.
-        let batch = self.render.build_batch();
-        self.render.renderer.render(&batch);
+        // Build the per-frame context. The borrow checker needs disjoint
+        // field accesses here: the closure captures `&mut self.render.renderer`
+        // and the context borrows `&self.render.sprite_pipeline` — both
+        // through `self.render`, so we name them as separate locals first.
+        let extent = self.swapchain.extent;
+        let device = &self.device;
+        let pipeline = &self.render.sprite_pipeline;
+        let clear = self.render.clear_color;
+        let renderer = &mut self.render.renderer;
 
-        gfx::frame::record_clear(
-            &self.device,
+        let ctx = crate::render::RenderContext {
+            pipeline,
+            extent,
+            sprites,
+            clear_color: clear,
+        };
+
+        gfx::frame::record_frame(
+            device,
             &self.swapchain,
             frame,
             image_index,
-            batch.clear_color,
+            clear,
+            |cb| {
+                renderer.record(device, cb, &ctx);
+            },
         )?;
 
         let needs_recreate = gfx::frame::submit_and_present(

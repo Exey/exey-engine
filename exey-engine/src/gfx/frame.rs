@@ -6,6 +6,10 @@
 //!
 //!   UNDEFINED      → COLOR_ATTACHMENT_OPTIMAL  (before begin_rendering)
 //!   COLOR_ATTACH.. → PRESENT_SRC_KHR           (after end_rendering, before queue_present)
+//!
+//! [`record_frame`] sandwiches the caller's `record_draws` closure between
+//! these barriers and the begin/end rendering pair. The renderer issues its
+//! `cmd_bind_pipeline` / `cmd_draw_indexed` calls inside that closure.
 
 use anyhow::{Context, Result};
 use vulkanalia::prelude::v1_0::*;
@@ -152,15 +156,21 @@ pub fn acquire(
     }
 }
 
-/// Records: barrier → begin_rendering → (optional draw) → end_rendering → barrier.
-/// In M1 there is no draw; this is the canvas the future renderers paint on.
-pub fn record_clear(
+/// Records: barrier → begin_rendering → `record_draws(cb)` → end_rendering → barrier.
+/// The closure is where the renderer issues its `cmd_bind_pipeline` /
+/// `cmd_draw_indexed` calls. M1's `record_clear` was just `record_frame`
+/// with an empty closure.
+pub fn record_frame<F>(
     device: &Device,
     swapchain: &Swapchain,
     frame: &FrameContext,
     image_index: u32,
     clear_color: [f32; 4],
-) -> Result<()> {
+    record_draws: F,
+) -> Result<()>
+where
+    F: FnOnce(vk::CommandBuffer),
+{
     let cb = frame.command_buffer;
     unsafe {
         device.logical.reset_command_buffer(cb, vk::CommandBufferResetFlags::empty())?;
@@ -186,7 +196,7 @@ pub fn record_clear(
         vk::PipelineStageFlags::COLOR_ATTACHMENT_OUTPUT,
     );
 
-    // 2) Begin dynamic rendering
+    // 2) Begin dynamic rendering.
     let clear = vk::ClearValue {
         color: vk::ClearColorValue { float32: clear_color },
     };
@@ -208,11 +218,18 @@ pub fn record_clear(
 
     unsafe {
         device.logical.cmd_begin_rendering(cb, &render_info);
-        // M2+: bind pipeline, vertex/index buffers, descriptors, draw.
+    }
+
+    // 3) Renderer-supplied draws. The closure may bind pipelines, push
+    // constants, descriptor sets, vertex/index buffers, and issue draws.
+    // It must NOT call begin/end_rendering.
+    record_draws(cb);
+
+    unsafe {
         device.logical.cmd_end_rendering(cb);
     }
 
-    // 3) COLOR_ATTACHMENT_OPTIMAL -> PRESENT_SRC_KHR
+    // 4) COLOR_ATTACHMENT_OPTIMAL -> PRESENT_SRC_KHR
     image_barrier(
         device,
         cb,

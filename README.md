@@ -1,7 +1,7 @@
 # ExeyEngine
 
-Rust + Vulkan port of **RCatEngine** by Exey Panteleev (originally written in
-ActionScript 3 on Stage3D, 2014). A 2D isometric sprite renderer with
+Rust + Vulkan port of an ActionScript 3 / Stage3D 2D isometric sprite engine
+written by Exey Panteleev in 2014. A 2D isometric sprite renderer with
 graph-topological depth sorting and a state-change-batched draw path.
 
 This repo is a Cargo workspace with two crates:
@@ -38,7 +38,7 @@ The asset packs we use:
 ## The architecture, in two paragraphs
 
 The original engine layered into:
-`RCatEngineCore` (root) → `RenderCore` (3 layers: background/world/gui) →
+`ExeyEngineCore` (root) → `RenderCore` (3 layers: background/world/gui) →
 pluggable `IRenderer` strategy + pluggable `ISorter` for the world layer.
 The renderer/sorter split was the key idea: it let Exey try `SimpleRenderer`,
 `BatchRenderer`, and `BigBufferRenderer` against `IsometricRectangleSorter` and
@@ -113,8 +113,7 @@ Iso depth sorting is *not* "sort by Y." Two tiles at the same Y can occlude
 each other depending on grid position; tall sprites overhang multiple tiles.
 A naive sort will flicker.
 
-The classical solution (which Exey credits to his earlier C++ work in
-`game_orcs/IsometricDepthSorting2D.h`) is:
+The classical solution (which Exey credits to his earlier C++ work) is:
 
 1. **Compute iso bounds for every sprite.** An iso bound is a rectangle
    `(isoX1, isoY1)–(isoX2, isoY2)` in world (logical) tile coordinates.
@@ -148,13 +147,13 @@ is fine. For everything else, use the topological sorter.
 
 ## Status
 
-This document covers M1 (window + clear color + FPS + renderer-selection CLI).
-See [`PLAN.md`](PLAN.md) for the milestone roadmap.
+This document covers M1 (window + clear color + FPS + renderer-selection CLI)
+and M2 (one textured quad). See [`PLAN.md`](PLAN.md) for the milestone roadmap.
 
 ## Credits
 
-- Original RCatEngine — **Exey Panteleev**, 2014.
+- Original ExeyEngine — **Exey Panteleev**, 2014.
 - Vulkan via [`vulkanalia`](https://github.com/KyleMayes/vulkanalia) (Kyle Mayes).
-- Iso depth-sort algorithm originally from Exey's `game_orcs` C++ work.
+- Iso depth-sort algorithm originally from Exey's earlier C++ work.
 - Demo asset pack: scrabling, CC BY 4.0.
 - Tiled `.tmx` file format: [mapeditor.org](https://www.mapeditor.org/).

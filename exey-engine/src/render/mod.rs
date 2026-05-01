@@ -2,21 +2,30 @@
 //!
 //! - [`RenderCore`] holds three layers (background / world / gui), the cameras,
 //!   and the chosen [`IRenderer`] strategy. Per frame it sorts the world layer
-//!   (via [`sort::ISorter`]), builds a [`RenderBatchData`], and hands that to
+//!   (via [`sort::ISorter`]), builds a [`RenderContext`], and hands that to
 //!   the renderer.
-//! - [`IRenderer`] is the strategy trait. M1 wires up the kinds; the real
-//!   implementations land in M3 (Simple), M4–M5 (Iso math + Sort), M6 (BigBuffer).
+//! - [`IRenderer`] is the strategy trait. M2 wires up a functional
+//!   [`SimpleRenderer`]; the Batch and BigBuffer kinds delegate to it for
+//!   identical output until M5/M6 ship the real algorithms.
 //!
 //! The `Kind` enum exists so the demo can pick a renderer at startup via a CLI
 //! flag (`--renderer simple|batch|bigbuffer`).
 
 pub mod camera;
 pub mod sort;
+pub mod sprite;
+pub mod sprite_pipeline;
 
-use crate::gfx::Device;
+use anyhow::Result;
+use vulkanalia::prelude::v1_0::*;
+
+use crate::gfx::{Device, Swapchain};
+
+pub use sprite::Sprite;
+pub use sprite_pipeline::{SpritePipeline, SpritePushConstants};
 
 /// Picks which IRenderer implementation to construct. Mirrors the comments
-/// in the AS3 `RCatEngineCore.context3dCreated_handler` where the user
+/// in the AS3 `ExeyEngineCore.context3dCreated_handler` where the user
 /// chose between `BigBufferRenderer`, `BatchRenderer`, and `SimpleRenderer`.
 #[derive(Copy, Clone, Debug, Default, PartialEq, Eq)]
 pub enum RendererKind {
@@ -49,68 +58,173 @@ impl RendererKind {
     }
 }
 
-/// The data passed from `RenderCore` to an `IRenderer` each frame.
-/// In later milestones this will hold a Vec of render-op instances; for M1
-/// it's just the clear color so we have a non-empty interface.
-#[derive(Default)]
-pub struct RenderBatchData {
+/// Per-frame data passed from `RenderCore` into [`IRenderer::record`].
+///
+/// M2 carries enough for the sprite pipeline: the pipeline itself, the
+/// framebuffer extent (used for the screen→clip push constant), and the
+/// list of sprites to draw. M4 will add the camera; M6 will let the
+/// BigBuffer renderer access the streaming vertex pool through here.
+pub struct RenderContext<'a> {
+    pub pipeline: &'a SpritePipeline,
+    pub extent: vk::Extent2D,
+    pub sprites: &'a [&'a Sprite],
     pub clear_color: [f32; 4],
 }
 
-/// Trait equivalent of AS3 `IRenderer`. Method names match the original
-/// (`init`, `render`) so future readers cross-referencing the AS3 sources
-/// will recognize the contract.
+/// Trait equivalent of AS3 `IRenderer`. The two methods correspond to the
+/// AS3 `init` (called once after device creation) and `render` (per-frame).
+/// In the Vulkan port `render` becomes [`record`](IRenderer::record) — it
+/// records draw commands into a command buffer that the caller has already
+/// transitioned and put inside a dynamic-rendering scope.
 pub trait IRenderer {
     fn kind(&self) -> RendererKind;
     /// Called once after device creation. Late milestones use this to build
-    /// pipelines, allocate persistent buffers, etc.
-    fn init(&mut self, device: &Device) -> anyhow::Result<()>;
-    /// Called per frame. M1 implementation is a no-op — the actual clear is
-    /// performed in `gfx::frame::record_clear` regardless of renderer.
-    fn render(&mut self, batch: &RenderBatchData);
+    /// per-renderer pipelines or persistent buffers; M2 has nothing to do here.
+    fn init(&mut self, device: &Device) -> Result<()>;
+    /// Called per frame inside `cmd_begin_rendering` / `cmd_end_rendering`.
+    /// Implementations issue `cmd_bind_pipeline`, `cmd_push_constants`,
+    /// `cmd_bind_descriptor_sets`, vertex/index binds, and draws.
+    fn record(&mut self, device: &Device, cb: vk::CommandBuffer, ctx: &RenderContext);
     /// Called once before the device is destroyed.
     fn destroy(&mut self, device: &Device);
 }
 
-/// M1 placeholder — all three kinds share this empty body. The real ones
-/// land in their own files in M3/M6.
-pub struct StubRenderer {
-    kind: RendererKind,
-}
+/// One draw call per sprite. The simplest possible IRenderer — easy to read,
+/// easy to debug, and the M2/M3 baseline against which Batch and BigBuffer
+/// will be benchmarked once they ship.
+pub struct SimpleRenderer;
 
-impl StubRenderer {
-    pub fn new(kind: RendererKind) -> Self {
-        Self { kind }
+impl SimpleRenderer {
+    pub fn new() -> Self {
+        Self
     }
 }
 
-impl IRenderer for StubRenderer {
+impl Default for SimpleRenderer {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl IRenderer for SimpleRenderer {
     fn kind(&self) -> RendererKind {
-        self.kind
+        RendererKind::Simple
     }
-    fn init(&mut self, _device: &Device) -> anyhow::Result<()> {
-        log::info!("renderer init: {} (M1 stub — clear-only)", self.kind.as_str());
+    fn init(&mut self, _device: &Device) -> Result<()> {
+        log::info!("renderer init: simple (one draw per sprite)");
         Ok(())
     }
-    fn render(&mut self, _batch: &RenderBatchData) {
-        // M1: clear-only. Future milestones populate this.
+    fn record(&mut self, device: &Device, cb: vk::CommandBuffer, ctx: &RenderContext) {
+        if ctx.sprites.is_empty() {
+            return;
+        }
+        ctx.pipeline.bind(device, cb, ctx.extent);
+        for sprite in ctx.sprites {
+            sprite.record(device, cb, ctx.pipeline, ctx.extent);
+        }
     }
     fn destroy(&mut self, _device: &Device) {}
 }
 
-/// Top-level render orchestrator. M1 holds only what's needed to wire up
-/// the renderer-selection flag; cameras and sort live here in M4+.
+/// M2 stub. Until M3+'s state-change-batching arrives, this is identical
+/// to [`SimpleRenderer`] — same draw calls, same output. The CLI flag is
+/// preserved so we can validate the wiring end-to-end before the real
+/// algorithm lands.
+pub struct BatchRenderer {
+    inner: SimpleRenderer,
+}
+
+impl BatchRenderer {
+    pub fn new() -> Self {
+        Self {
+            inner: SimpleRenderer::new(),
+        }
+    }
+}
+
+impl Default for BatchRenderer {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl IRenderer for BatchRenderer {
+    fn kind(&self) -> RendererKind {
+        RendererKind::Batch
+    }
+    fn init(&mut self, device: &Device) -> Result<()> {
+        log::info!("renderer init: batch (M2 stub — delegates to simple)");
+        self.inner.init(device)
+    }
+    fn record(&mut self, device: &Device, cb: vk::CommandBuffer, ctx: &RenderContext) {
+        self.inner.record(device, cb, ctx);
+    }
+    fn destroy(&mut self, device: &Device) {
+        self.inner.destroy(device);
+    }
+}
+
+/// M2 stub. Same shape as [`BatchRenderer`] — placeholder until M6 builds
+/// the 65k-cap streaming buffer pool and the state-change loop.
+pub struct BigBufferRenderer {
+    inner: SimpleRenderer,
+}
+
+impl BigBufferRenderer {
+    pub fn new() -> Self {
+        Self {
+            inner: SimpleRenderer::new(),
+        }
+    }
+}
+
+impl Default for BigBufferRenderer {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl IRenderer for BigBufferRenderer {
+    fn kind(&self) -> RendererKind {
+        RendererKind::BigBuffer
+    }
+    fn init(&mut self, device: &Device) -> Result<()> {
+        log::info!("renderer init: bigbuffer (M2 stub — delegates to simple)");
+        self.inner.init(device)
+    }
+    fn record(&mut self, device: &Device, cb: vk::CommandBuffer, ctx: &RenderContext) {
+        self.inner.record(device, cb, ctx);
+    }
+    fn destroy(&mut self, device: &Device) {
+        self.inner.destroy(device);
+    }
+}
+
+fn make_renderer(kind: RendererKind) -> Box<dyn IRenderer> {
+    match kind {
+        RendererKind::Simple => Box::new(SimpleRenderer::new()),
+        RendererKind::Batch => Box::new(BatchRenderer::new()),
+        RendererKind::BigBuffer => Box::new(BigBufferRenderer::new()),
+    }
+}
+
+/// Top-level render orchestrator. M2 owns the [`SpritePipeline`] in addition
+/// to the renderer strategy; the demo borrows the pipeline to allocate
+/// descriptor sets for its textures.
 pub struct RenderCore {
     pub renderer: Box<dyn IRenderer>,
+    pub sprite_pipeline: SpritePipeline,
     pub clear_color: [f32; 4],
 }
 
 impl RenderCore {
-    pub fn new(kind: RendererKind, device: &Device) -> anyhow::Result<Self> {
-        let mut renderer: Box<dyn IRenderer> = Box::new(StubRenderer::new(kind));
+    pub fn new(kind: RendererKind, device: &Device, swapchain: &Swapchain) -> Result<Self> {
+        let mut renderer = make_renderer(kind);
         renderer.init(device)?;
+        let sprite_pipeline = SpritePipeline::new(device, swapchain)?;
         Ok(Self {
             renderer,
+            sprite_pipeline,
             // Cornflower blue. Easy to recognise, easy to spot stuck pipelines.
             clear_color: [0.39, 0.58, 0.93, 1.0],
         })
@@ -118,11 +232,6 @@ impl RenderCore {
 
     pub fn destroy(&mut self, device: &Device) {
         self.renderer.destroy(device);
-    }
-
-    pub fn build_batch(&self) -> RenderBatchData {
-        RenderBatchData {
-            clear_color: self.clear_color,
-        }
+        self.sprite_pipeline.destroy(device);
     }
 }

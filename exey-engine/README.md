@@ -8,39 +8,61 @@ For the algorithm write-ups (BigBuffer, IsometricRectangleSorter), see the
 ## Public types
 
 ```rust
-use exey_engine::{Engine, EngineConfig, RendererKind, FrameClock};
+use exey_engine::{Engine, EngineConfig, RendererKind, FrameClock, Sprite, Texture, Vertex2D};
 ```
 
 - [`Engine`](src/core.rs) — the equivalent of `ExeyEngineCore`. Owns Vulkan,
-  exposes `draw_frame(&Window)`, `on_resize((u32, u32))`.
+  exposes `draw_frame(&Window, &[&Sprite])`, `on_resize((u32, u32))`.
 - [`EngineConfig`](src/core.rs) — start-time options (app name, renderer kind).
 - [`RendererKind`](src/render/mod.rs) — `Simple | Batch | BigBuffer`.
   Maps from `--renderer` CLI strings via `RendererKind::from_cli`.
+- [`Sprite`](src/render/sprite.rs) — M2 textured-quad drawable. M3 replaces
+  this with the AS3 `Sprite2D` / `IRenderable` plumbing.
+- [`Texture`](src/gfx/texture.rs) — owns a `vk::Image` + view + sampler.
+  Build via `from_rgba(...)` or `from_png_bytes(...)`.
+- [`Vertex2D`](src/draw/vertex.rs) — pos/color/uv vertex. Mirrors the AS3
+  `VertexDataBinary` layout, widened to `vec4` color.
 - [`FrameClock`](src/time.rs) — delta time + smoothed FPS.
 
 ## Module map vs. the AS3 sources
 
-| AS3 package                    | Rust module                                        |
-|--------------------------------|----------------------------------------------------|
-| `ragcat.engine.ExeyEngineCore` | `core::Engine`                                     |
-| `ragcat.engine.stage3d.*`      | `gfx::{instance, device, swapchain, frame}`        |
-| `ragcat.engine.render.RenderCore` | `render::RenderCore`                            |
-| `ragcat.engine.render.renderers.IRenderer` | `render::IRenderer`                    |
-| `ragcat.engine.render.renderers.SimpleRenderer` | `render::simple` (M3)             |
-| `ragcat.engine.render.renderers.BatchRenderer`  | `render::batch_renderer` (M6)      |
-| `ragcat.engine.render.renderers.BigBufferRenderer` | `render::big_buffer` (M6) ★      |
-| `ragcat.engine.render.sorting.ISorter`          | `render::sort::ISorter`            |
-| `ragcat.engine.render.sorting.IsometricRectangleSorter` | `render::sort::iso_rect` (M5) ★ |
-| `ragcat.engine.render.sorting.ScreenYSorter`    | `render::sort::screen_y`           |
-| `ragcat.engine.render.camera.*`                 | `render::camera`                   |
-| `ragcat.engine.draw.*`                          | `render::draw` (M3+)               |
-| `ragcat.engine.draw.animation.*`                | `render::animation` (M7)           |
+| AS3 package                                   | Rust module                                              |
+|-----------------------------------------------|----------------------------------------------------------|
+| `exey.engine.ExeyEngineCore`                  | `core::Engine`                                           |
+| `exey.engine.stage3d.*`                       | `gfx::{instance, device, swapchain, frame, buffer, memory, texture}` |
+| `exey.engine.stage3d.VertexDataBinary`        | `draw::Vertex2D`                                         |
+| `exey.engine.render.RenderCore`               | `render::RenderCore`                                     |
+| `exey.engine.render.renderers.IRenderer`      | `render::IRenderer`                                      |
+| `exey.engine.render.renderers.SimpleRenderer` | `render::SimpleRenderer` (M2; functional)                |
+| `exey.engine.render.renderers.BatchRenderer`  | `render::BatchRenderer` (M2 stub → M6)                   |
+| `exey.engine.render.renderers.BigBufferRenderer` | `render::BigBufferRenderer` (M2 stub → M6) ★          |
+| `exey.engine.render.sorting.ISorter`          | `render::sort::ISorter`                                  |
+| `exey.engine.render.sorting.IsometricRectangleSorter` | `render::sort::iso_rect` (M5) ★                  |
+| `exey.engine.render.sorting.ScreenYSorter`    | `render::sort::screen_y`                                 |
+| `exey.engine.render.camera.*`                 | `render::camera`                                         |
+| `exey.engine.draw.*`                          | `draw::*` (M3+)                                          |
+| `exey.engine.draw.animation.*`                | `draw::animation` (M7)                                   |
 
 The naming preserves the original conventions where it improves discoverability,
 and Rust-ifies it where AS3 conventions don't translate (e.g. `IRenderable`
 trait → just `Renderable` would be more idiomatic, but I kept the I-prefix
 in `IRenderer` and `ISorter` because the strategy-pattern relationship is the
 whole point and renaming would obscure the lineage).
+
+## Shaders
+
+GLSL sources live in `shaders/`; the matching SPIR-V blobs are committed
+under `shaders/spv/` and `include_bytes!`d at engine load time. After editing
+any `*.vert` / `*.frag`, run:
+
+```sh
+../tools/compile_shaders.sh
+```
+
+This needs `glslang`, `glslangValidator`, or `glslc` on `PATH` — install
+`glslang-tools` (Linux apt), `glslang` (Homebrew on macOS), or the LunarG
+Vulkan SDK. The script picks whichever is available. The vanilla `cargo
+build` does **not** need any of these because the SPIR-V is committed.
 
 ## Building from a fresh tree
 
