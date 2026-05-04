@@ -40,7 +40,7 @@ impl Args {
                         if let Some(k) = RendererKind::from_cli(&v) {
                             renderer = k;
                         } else {
-                            eprintln!("unknown renderer '{v}', falling back to default");
+                            println!("unknown renderer '{v}', falling back to default");
                         }
                     }
                 }
@@ -70,13 +70,48 @@ fn print_help() {
     println!("    -h, --help              print this message");
 }
 
-fn main() -> Result<()> {
-    // env_logger respects RUST_LOG env var. Default to info so users see
-    // GPU pick / swapchain info on stdout.
-    if std::env::var("RUST_LOG").is_err() {
-        unsafe { std::env::set_var("RUST_LOG", "info") };
+/// Simple stdout-flushing logger. We use this instead of env_logger because
+/// on some terminals (notably some macOS setups) stderr appears buffered or
+/// silenced; stdout is more reliably user-visible. Every log line is followed
+/// by an explicit flush so output appears immediately.
+struct StdoutLogger;
+impl log::Log for StdoutLogger {
+    fn enabled(&self, metadata: &log::Metadata) -> bool {
+        metadata.level() <= log::Level::Info
     }
-    env_logger::init();
+    fn log(&self, record: &log::Record) {
+        if !self.enabled(record.metadata()) {
+            return;
+        }
+        use std::io::Write;
+        let mut out = std::io::stdout().lock();
+        let _ = writeln!(
+            out,
+            "[{:>5}] {}: {}",
+            record.level(),
+            record.target(),
+            record.args()
+        );
+        let _ = out.flush();
+    }
+    fn flush(&self) {
+        use std::io::Write;
+        let _ = std::io::stdout().lock().flush();
+    }
+}
+static LOGGER: StdoutLogger = StdoutLogger;
+
+fn main() -> Result<()> {
+    // Stdout-flushed banner: this is the very first thing main() does. If
+    // you don't see this in your terminal, the binary isn't reaching main()
+    // (or stdout is being swallowed by something outside our control).
+    println!("=== isometric-world-generator: main() entered");
+    use std::io::Write;
+    let _ = std::io::stdout().flush();
+
+    log::set_logger(&LOGGER).expect("failed to install logger");
+    log::set_max_level(log::LevelFilter::Info);
+    log::info!("logger installed (stdout, flushed)");
 
     let args = Args::parse();
     log::info!("renderer = {}", args.renderer.as_str());
@@ -95,7 +130,9 @@ fn main() -> Result<()> {
         clock: FrameClock::new(),
         last_fps_print: Instant::now(),
     };
+    log::info!("entering event loop");
     event_loop.run_app(&mut app)?;
+    log::info!("event loop exited cleanly");
     Ok(())
 }
 
@@ -110,6 +147,8 @@ struct Scene {
 
 impl Scene {
     fn new(engine: &Engine) -> Result<Self> {
+        log::info!("Scene::new — building procedural checkerboard");
+
         // 64×64 magenta-on-black checkerboard, 8×8-pixel cells. Bright enough
         // to be unmistakable when rendered, generic enough to also serve as a
         // sanity check for sampler / format configuration.
@@ -154,6 +193,7 @@ impl Scene {
             quad_h,
         )?;
 
+        log::info!("Scene::new — done");
         Ok(Self { sprite, texture })
     }
 
@@ -180,6 +220,7 @@ struct App {
 
 impl ApplicationHandler for App {
     fn resumed(&mut self, event_loop: &ActiveEventLoop) {
+        println!("=== App::resumed (window already? {})", self.window.is_some());
         if self.window.is_some() {
             return;
         }
@@ -192,28 +233,41 @@ impl ApplicationHandler for App {
         let window = match event_loop.create_window(attrs) {
             Ok(w) => Arc::new(w),
             Err(e) => {
+                println!("=== create_window FAILED: {e}");
                 log::error!("create_window failed: {e}");
                 event_loop.exit();
                 return;
             }
         };
+        println!("=== window created  inner_size={:?}", window.inner_size());
         let engine = match Engine::new(&window, self.config.clone()) {
             Ok(e) => e,
             Err(e) => {
+                println!("=== Engine::new FAILED: {e:#}");
                 log::error!("engine init failed: {e:#}");
                 event_loop.exit();
                 return;
             }
         };
+        println!("=== Engine::new ok");
         match Scene::new(&engine) {
             Ok(scene) => self.scene = Some(scene),
             Err(e) => {
+                println!("=== Scene::new FAILED: {e:#}");
                 log::error!("scene init failed: {e:#}");
                 event_loop.exit();
                 return;
             }
         }
+        println!("=== Scene::new ok");
         self.engine = Some(engine);
+        // Kick the redraw loop. On macOS / winit 0.30 the `RedrawRequested`
+        // event isn't fired automatically after window creation; we have to
+        // request the first one ourselves. Each subsequent frame requests
+        // the next one inside `RedrawRequested`, so we self-perpetuate.
+        println!("=== resumed: requesting first redraw");
+        log::info!("App::resumed — requesting first redraw");
+        window.request_redraw();
         self.window = Some(window);
     }
 
@@ -226,6 +280,23 @@ impl ApplicationHandler for App {
         let Some(window) = self.window.as_ref().cloned() else {
             return;
         };
+        // First-event diagnostic: print exactly once per event variant we
+        // care about so we can confirm winit is feeding us events.
+        match &event {
+            WindowEvent::RedrawRequested => {
+                static FIRST: std::sync::OnceLock<()> = std::sync::OnceLock::new();
+                if FIRST.set(()).is_ok() {
+                    println!("=== first WindowEvent::RedrawRequested received");
+                }
+            }
+            WindowEvent::Resized(size) => {
+                println!("=== WindowEvent::Resized {}x{}", size.width, size.height);
+            }
+            WindowEvent::CloseRequested => {
+                println!("=== WindowEvent::CloseRequested");
+            }
+            _ => {}
+        }
         match event {
             WindowEvent::CloseRequested => {
                 event_loop.exit();

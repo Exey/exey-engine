@@ -69,6 +69,10 @@ pub struct RenderContext<'a> {
     pub extent: vk::Extent2D,
     pub sprites: &'a [&'a Sprite],
     pub clear_color: [f32; 4],
+    /// Diagnostic logging toggle. The engine sets this for the first few
+    /// frames after startup so we can confirm the renderer is actually
+    /// recording draws; otherwise the renderer stays silent.
+    pub verbose: bool,
 }
 
 /// Trait equivalent of AS3 `IRenderer`. The two methods correspond to the
@@ -116,10 +120,28 @@ impl IRenderer for SimpleRenderer {
     }
     fn record(&mut self, device: &Device, cb: vk::CommandBuffer, ctx: &RenderContext) {
         if ctx.sprites.is_empty() {
+            if ctx.verbose {
+                log::info!("  SimpleRenderer::record  → 0 sprites (clear-only frame)");
+            }
             return;
         }
+        if ctx.verbose {
+            log::info!(
+                "  SimpleRenderer::record  → binding pipeline + drawing {} sprite(s)",
+                ctx.sprites.len()
+            );
+        }
         ctx.pipeline.bind(device, cb, ctx.extent);
-        for sprite in ctx.sprites {
+        for (i, sprite) in ctx.sprites.iter().enumerate() {
+            if ctx.verbose {
+                log::info!(
+                    "    sprite[{i}]: indices={}  vbuf={:?}  ibuf={:?}  desc={:?}",
+                    sprite.index_count,
+                    sprite.vertex_buffer.handle,
+                    sprite.index_buffer.handle,
+                    sprite.descriptor_set,
+                );
+            }
             sprite.record(device, cb, ctx.pipeline, ctx.extent);
         }
     }

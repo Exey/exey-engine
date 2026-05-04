@@ -41,6 +41,11 @@ impl Sprite {
         w: f32,
         h: f32,
     ) -> Result<Self> {
+        log::info!(
+            "Sprite::quad — building quad at ({x}, {y}) size {w}x{h}, \
+             texture {}x{}",
+            texture.width, texture.height,
+        );
         let white = [1.0, 1.0, 1.0, 1.0];
         let verts = [
             Vertex2D::new([x,     y    ], white, [0.0, 0.0]),
@@ -73,6 +78,13 @@ impl Sprite {
         index_buffer.write_bytes(device, i_bytes)?;
 
         let descriptor_set = pipeline.allocate_descriptor(device, texture)?;
+
+        log::info!(
+            "Sprite::quad — built  vbuf={:?} ({} bytes)  ibuf={:?} ({} bytes)  desc={:?}",
+            vertex_buffer.handle, v_bytes.len(),
+            index_buffer.handle, i_bytes.len(),
+            descriptor_set,
+        );
 
         Ok(Self {
             vertex_buffer,

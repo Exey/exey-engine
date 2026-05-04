@@ -85,10 +85,18 @@ pub struct SpritePipeline {
 
 impl SpritePipeline {
     pub fn new(device: &Device, swapchain: &Swapchain) -> Result<Self> {
+        log::info!(
+            "SpritePipeline::new — building for color format {:?} ({}x{})",
+            swapchain.format, swapchain.extent.width, swapchain.extent.height,
+        );
         let descriptor_set_layout = create_descriptor_set_layout(device)?;
         let layout = create_pipeline_layout(device, descriptor_set_layout)?;
         let pipeline = create_pipeline(device, layout, swapchain.format)?;
         let descriptor_pool = create_descriptor_pool(device)?;
+        log::info!(
+            "SpritePipeline::new — ready.  pipeline={:?}  layout={:?}  pool={:?}",
+            pipeline, layout, descriptor_pool,
+        );
 
         Ok(Self {
             layout,

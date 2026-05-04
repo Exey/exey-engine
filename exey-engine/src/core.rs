@@ -36,6 +36,10 @@ pub struct Engine {
     /// or when the window is minimized (extent 0×0). The next non-zero
     /// resize event recreates the swapchain.
     pub needs_recreate: bool,
+    /// Monotonic frame counter. Used by the diagnostic logging path so we
+    /// log the first few frames in detail (to confirm wiring) and then
+    /// stay quiet to avoid console spam.
+    pub frame_index: u64,
 }
 
 impl Engine {
@@ -53,6 +57,7 @@ impl Engine {
             device,
             instance,
             needs_recreate: false,
+            frame_index: 0,
         })
     }
 
@@ -67,13 +72,29 @@ impl Engine {
     /// the demo owns the sprite resources and passes them in by reference.
     /// Empty slice = clear-only frame (the M1 behaviour).
     pub fn draw_frame(&mut self, window: &Window, sprites: &[&Sprite]) -> Result<()> {
+        // Log only the first few frames in detail so we can confirm wiring
+        // end-to-end without spamming the console at ~vsync rate. After
+        // VERBOSE_FRAMES, this method is silent on the happy path.
+        const VERBOSE_FRAMES: u64 = 3;
+        let verbose = self.frame_index < VERBOSE_FRAMES;
+
         let size = window.inner_size();
         if size.width == 0 || size.height == 0 {
             // Minimized — skip the frame entirely. Trying to acquire here
             // gives undefined behaviour on some drivers.
+            if verbose {
+                log::info!(
+                    "frame {}: skipped (window minimized, extent {}x{})",
+                    self.frame_index, size.width, size.height
+                );
+            }
             return Ok(());
         }
         if self.needs_recreate {
+            log::info!(
+                "frame {}: recreating swapchain ({}x{})",
+                self.frame_index, size.width, size.height
+            );
             self.recreate_swapchain((size.width, size.height))?;
             self.needs_recreate = false;
         }
@@ -82,6 +103,9 @@ impl Engine {
         let image_index = match gfx::frame::acquire(&self.device, &self.swapchain, frame)? {
             AcquireResult::Ok(i) => i,
             AcquireResult::Recreate => {
+                if verbose {
+                    log::info!("frame {}: acquire said recreate", self.frame_index);
+                }
                 self.needs_recreate = true;
                 return Ok(());
             }
@@ -97,11 +121,24 @@ impl Engine {
         let clear = self.render.clear_color;
         let renderer = &mut self.render.renderer;
 
+        if verbose {
+            log::info!(
+                "frame {}: extent={}x{}  image_index={}  sprites={}  renderer={:?}",
+                self.frame_index,
+                extent.width,
+                extent.height,
+                image_index,
+                sprites.len(),
+                renderer.kind(),
+            );
+        }
+
         let ctx = crate::render::RenderContext {
             pipeline,
             extent,
             sprites,
             clear_color: clear,
+            verbose,
         };
 
         gfx::frame::record_frame(
@@ -124,6 +161,7 @@ impl Engine {
         self.needs_recreate |= needs_recreate;
 
         self.frames.advance();
+        self.frame_index += 1;
         Ok(())
     }
 

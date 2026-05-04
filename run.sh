@@ -18,7 +18,7 @@ ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 ASSETS_DIR="${ASSETS_DIR:-$ROOT/isometric-world-generator/assets}"
 
 PROFILE_FLAG="--release"
-RENDERER="bigbuffer"
+RENDERER="simple"
 
 while (( $# > 0 )); do
   case "$1" in

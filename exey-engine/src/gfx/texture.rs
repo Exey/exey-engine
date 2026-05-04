@@ -49,6 +49,10 @@ impl Texture {
             "Texture::from_rgba: got {} bytes, expected {expected} ({width}x{height} RGBA8)",
             rgba.len()
         );
+        log::info!(
+            "Texture::from_rgba — uploading {width}x{height} RGBA ({} bytes) as R8G8B8A8_SRGB",
+            rgba.len()
+        );
 
         // 1) staging buffer.
         let mut staging = Buffer::host_visible(
@@ -103,6 +107,11 @@ impl Texture {
         // 6) view + sampler.
         let view = create_view(device, image, format)?;
         let sampler = create_sampler(device)?;
+
+        log::info!(
+            "Texture::from_rgba — done.  image={:?}  view={:?}  sampler={:?}",
+            image, view, sampler,
+        );
 
         Ok(Self {
             image,
