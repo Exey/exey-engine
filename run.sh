@@ -18,7 +18,7 @@ ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 ASSETS_DIR="${ASSETS_DIR:-$ROOT/isometric-world-generator/assets}"
 
 PROFILE_FLAG="--release"
-RENDERER="simple"
+RENDERER="bigbuffer"
 
 while (( $# > 0 )); do
   case "$1" in
@@ -74,4 +74,6 @@ echo "[run.sh] building ($PROFILE_FLAG)…"
 cargo build $PROFILE_FLAG -p isometric-world-generator
 
 echo "[run.sh] running with renderer=$RENDERER"
+echo "[run.sh] log file will be at: ${TMPDIR:-/tmp}/exey-engine.log"
+echo "[run.sh] (if terminal output is silent, run 'tail -f ${TMPDIR:-/tmp}/exey-engine.log' in another tab)"
 exec cargo run $PROFILE_FLAG -p isometric-world-generator -- --renderer "$RENDERER"

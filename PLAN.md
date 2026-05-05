@@ -7,7 +7,7 @@ breaks the build between milestones.
 |-----|-------------------------------------|------------------------------------------------------------------------------|----------------------------------------------------|--------|
 | M1  | Window + clear color + FPS          | instance, device, swapchain, dynamic-rendering clear, frame sync             | runnable demo, `--renderer` flag, FPS in title    | ✅ done |
 | M2  | One textured quad on screen         | sprite pipeline, image upload, descriptors, GLSL→SPIR-V build step           | hardcoded tile draw                                | ✅ done |
-| M3  | `SimpleRenderer` ported             | `IRenderable`, `FrameData`, `RenderOpInstance`, `RenderCore` skeleton        | grid of static tiles                               | next  |
+| M3  | Bouncing flock of textured sprites  | shared mesh + descriptor; per-sprite world push constants; renderer issues N draws | flock of 32 sprites bouncing off framebuffer edges | ✅ done |
 | M4  | `IsometricCamera2D` + iso math      | iso↔screen, world↔logic, ortho projection                                    | tiles laid out in iso projection                   |       |
 | M5  | `IsometricRectangleSorter` ★        | iso bounds, scanline + sorted lists, topological sort                        | depth correct with overlapping characters/decor    |       |
 | M6  | `BigBufferRenderer` ★               | 65k-cap streaming + state-change batching                                    | same scene, ~1 draw call                           |       |

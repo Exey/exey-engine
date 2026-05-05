@@ -6,15 +6,16 @@
 //! - [`render::RenderCore`]      is the equivalent of `RenderCore` — three layers
 //!                               (background, world, gui), a pluggable [`render::IRenderer`],
 //!                               and a pluggable [`render::sort::ISorter`].
-//! - [`render::sprite_pipeline`] is the M2 textured-quad graphics pipeline (one
-//!                               combined image sampler + screen→clip push constant).
-//! - [`render::Sprite`]          is the M2 drawable; M3 replaces it with the AS3
-//!                               `Sprite2D` / `IRenderable` plumbing.
+//! - [`render::sprite_pipeline`] is the textured-quad graphics pipeline (one
+//!                               combined image sampler + screen/world push constants).
+//! - [`render::SpriteMesh`]      is the shared unit-quad geometry + texture descriptor.
+//! - [`render::Sprite`]          is per-sprite CPU state (position, size, velocity, tint).
 //!
-//! M2 scope: textured quads on screen via dynamic-rendering, with a procedural
-//! checkerboard texture supplied by the demo. The renderer trait now records
-//! draws into the per-frame command buffer; Batch and BigBuffer renderers
-//! delegate to [`render::SimpleRenderer`] until M5/M6 ship the real algorithms.
+//! M3 scope: a flock of textured quads bouncing off the window edges, all
+//! sharing one mesh + descriptor + pipeline; the demo updates sprite state
+//! per frame and the renderer records one draw per sprite via push
+//! constants. Batch and BigBuffer renderers still delegate to
+//! [`render::SimpleRenderer`] until M5/M6 ship the real algorithms.
 
 #![forbid(unsafe_op_in_unsafe_fn)]
 
@@ -28,7 +29,7 @@ pub mod time;
 pub use crate::core::{Engine, EngineConfig};
 pub use crate::draw::Vertex2D;
 pub use crate::gfx::Texture;
-pub use crate::render::{RendererKind, Sprite};
+pub use crate::render::{RendererKind, Sprite, SpriteMesh};
 pub use crate::time::FrameClock;
 
 // Re-export glam so the demo and engine speak the exact same math types.

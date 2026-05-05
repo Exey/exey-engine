@@ -16,10 +16,17 @@
 //! ```text
 //!   offset  size  field
 //!   ------  ----  -----
-//!     0      8    vec2 scale     // 2.0/extent.{w,h}, screen → NDC scale
-//!     8      8    vec2 offset    // (-1, -1), shift origin to top-left
-//!    16     16    vec4 tint      // per-draw color modulator (default [1;4])
+//!     0      8    vec2 screen_scale  // 2.0/extent.{w,h}, pixel → NDC scale
+//!     8      8    vec2 screen_offset // (-1, -1), shift origin to top-left
+//!    16      8    vec2 world_pos     // per-sprite top-left in pixels
+//!    24      8    vec2 world_size    // per-sprite size in pixels
+//!    32     16    vec4 tint          // per-draw color modulator (default [1;4])
 //! ```
+//!
+//! Total: 48 bytes — well under the 128-byte Vulkan minimum guarantee.
+//! Widened from 32 bytes in M2: vertex coords are now unit-quad local [0..1],
+//! and the per-sprite world transform travels through the push constant so
+//! many sprites can share a single vertex/index buffer.
 //!
 //! Dynamic state covers viewport and scissor so we don't rebuild the pipeline
 //! on resize. Color attachment format must match the swapchain at pipeline
@@ -46,30 +53,54 @@ pub const MAX_TEXTURES: u32 = 64;
 #[repr(C)]
 #[derive(Copy, Clone, Debug, Pod, Zeroable)]
 pub struct SpritePushConstants {
-    pub scale: [f32; 2],
-    pub offset: [f32; 2],
+    /// 2/extent — multiplied with pixel coords to scale into NDC range.
+    pub screen_scale: [f32; 2],
+    /// (-1, -1) — shift origin from top-left pixel (0,0) to NDC (-1, -1).
+    pub screen_offset: [f32; 2],
+    /// Per-sprite top-left in pixels.
+    pub world_pos: [f32; 2],
+    /// Per-sprite size in pixels.
+    pub world_size: [f32; 2],
+    /// Per-draw color modulator, multiplied into the per-vertex color.
     pub tint: [f32; 4],
 }
 
 // Layout note: GLSL push constants follow std430-ish rules where `vec2` is
-// 8-byte-aligned and `vec4` is 16-byte-aligned. With the field order above
-// (vec2, vec2, vec4) the natural sequential offsets (0, 8, 16) happen to
-// match what GLSL expects, so a `repr(C)` Rust struct serializes correctly
-// without manual padding. If you reorder the fields, recheck — e.g. `vec3`
-// followed by `f32` packs differently in std430 than in repr(C).
+// 8-byte-aligned and `vec4` is 16-byte-aligned. Field order is four `vec2`s
+// (offsets 0, 8, 16, 24) followed by one `vec4` at offset 32 — std430
+// places `vec4` on a 16-byte boundary and 32 is divisible by 16, so the
+// natural `repr(C)` layout matches GLSL exactly. If you reorder, recheck:
+// e.g. `vec3` followed by `f32` packs differently in std430 than in repr(C).
 
 impl SpritePushConstants {
-    /// Build the screen → NDC mapping for a given framebuffer extent.
-    /// Pixel coords with origin top-left map to clip space [-1, 1] with +Y
-    /// down (the natural Vulkan convention; we don't flip).
-    pub fn for_extent(extent: vk::Extent2D, tint: [f32; 4]) -> Self {
+    /// Build the per-frame screen → NDC mapping. The per-sprite fields
+    /// (`world_pos`, `world_size`, `tint`) are left at defaults; the
+    /// renderer overwrites them per draw.
+    pub fn for_extent(extent: vk::Extent2D) -> Self {
         let w = extent.width.max(1) as f32;
         let h = extent.height.max(1) as f32;
         Self {
-            scale: [2.0 / w, 2.0 / h],
-            offset: [-1.0, -1.0],
-            tint,
+            screen_scale: [2.0 / w, 2.0 / h],
+            screen_offset: [-1.0, -1.0],
+            world_pos: [0.0, 0.0],
+            world_size: [0.0, 0.0],
+            tint: [1.0, 1.0, 1.0, 1.0],
         }
+    }
+
+    /// Convenience: same as [`Self::for_extent`] but also fills in the
+    /// per-sprite fields. Used by the renderer right before each draw.
+    pub fn for_sprite(
+        extent: vk::Extent2D,
+        world_pos: [f32; 2],
+        world_size: [f32; 2],
+        tint: [f32; 4],
+    ) -> Self {
+        let mut pc = Self::for_extent(extent);
+        pc.world_pos = world_pos;
+        pc.world_size = world_size;
+        pc.tint = tint;
+        pc
     }
 }
 

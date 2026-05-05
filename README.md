@@ -147,8 +147,9 @@ is fine. For everything else, use the topological sorter.
 
 ## Status
 
-This document covers M1 (window + clear color + FPS + renderer-selection CLI)
-and M2 (one textured quad). See [`PLAN.md`](PLAN.md) for the milestone roadmap.
+This document covers M1 (window + clear color + FPS + renderer-selection CLI),
+M2 (one textured quad), and M3 (bouncing flock of textured sprites). See
+[`PLAN.md`](PLAN.md) for the milestone roadmap.
 
 ## Credits
 

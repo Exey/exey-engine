@@ -21,7 +21,7 @@ use vulkanalia::prelude::v1_0::*;
 
 use crate::gfx::{Device, Swapchain};
 
-pub use sprite::Sprite;
+pub use sprite::{Sprite, SpriteMesh};
 pub use sprite_pipeline::{SpritePipeline, SpritePushConstants};
 
 /// Picks which IRenderer implementation to construct. Mirrors the comments
@@ -60,14 +60,20 @@ impl RendererKind {
 
 /// Per-frame data passed from `RenderCore` into [`IRenderer::record`].
 ///
-/// M2 carries enough for the sprite pipeline: the pipeline itself, the
-/// framebuffer extent (used for the screen→clip push constant), and the
-/// list of sprites to draw. M4 will add the camera; M6 will let the
-/// BigBuffer renderer access the streaming vertex pool through here.
+/// In M3 the context carries:
+/// * `pipeline` — the textured-quad pipeline (shared)
+/// * `mesh` — the shared unit-quad geometry + texture descriptor
+/// * `extent` — framebuffer size in pixels (for the screen→clip transform)
+/// * `sprites` — CPU-side state for the sprites to draw this frame
+/// * `clear_color`, `verbose` — orchestration / diagnostics
+///
+/// M4 will add the camera; M6 will let the BigBuffer renderer access the
+/// streaming vertex pool through here.
 pub struct RenderContext<'a> {
     pub pipeline: &'a SpritePipeline,
+    pub mesh: &'a SpriteMesh,
     pub extent: vk::Extent2D,
-    pub sprites: &'a [&'a Sprite],
+    pub sprites: &'a [Sprite],
     pub clear_color: [f32; 4],
     /// Diagnostic logging toggle. The engine sets this for the first few
     /// frames after startup so we can confirm the renderer is actually
@@ -127,22 +133,34 @@ impl IRenderer for SimpleRenderer {
         }
         if ctx.verbose {
             log::info!(
-                "  SimpleRenderer::record  → binding pipeline + drawing {} sprite(s)",
+                "  SimpleRenderer::record  → bind once, {} sprite(s) × (push_constants + draw)",
                 ctx.sprites.len()
             );
         }
+        // Per-frame state: pipeline + viewport/scissor.
         ctx.pipeline.bind(device, cb, ctx.extent);
+        // Shared mesh: vertex buffer, index buffer, descriptor set.
+        ctx.mesh.bind(device, cb, ctx.pipeline);
+        // Per-sprite: write push constant, draw indexed. Each sprite is
+        // 6 indices = 1 quad. The push constant is fully overwritten each
+        // call, so screen-scale/offset are written redundantly — cheap.
         for (i, sprite) in ctx.sprites.iter().enumerate() {
-            if ctx.verbose {
+            let pc = SpritePushConstants::for_sprite(
+                ctx.extent,
+                sprite.pos,
+                sprite.size,
+                sprite.tint,
+            );
+            ctx.pipeline.push_constants(device, cb, &pc);
+            unsafe {
+                device.logical.cmd_draw_indexed(cb, ctx.mesh.index_count, 1, 0, 0, 0);
+            }
+            if ctx.verbose && i < 3 {
                 log::info!(
-                    "    sprite[{i}]: indices={}  vbuf={:?}  ibuf={:?}  desc={:?}",
-                    sprite.index_count,
-                    sprite.vertex_buffer.handle,
-                    sprite.index_buffer.handle,
-                    sprite.descriptor_set,
+                    "    sprite[{i}]: pos=({:.1},{:.1}) size=({:.1},{:.1})",
+                    sprite.pos[0], sprite.pos[1], sprite.size[0], sprite.size[1],
                 );
             }
-            sprite.record(device, cb, ctx.pipeline, ctx.extent);
         }
     }
     fn destroy(&mut self, _device: &Device) {}

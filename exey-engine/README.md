@@ -12,16 +12,20 @@ use exey_engine::{Engine, EngineConfig, RendererKind, FrameClock, Sprite, Textur
 ```
 
 - [`Engine`](src/core.rs) — the equivalent of `ExeyEngineCore`. Owns Vulkan,
-  exposes `draw_frame(&Window, &[&Sprite])`, `on_resize((u32, u32))`.
+  exposes `draw_frame(&Window, &SpriteMesh, &[Sprite])`, `on_resize((u32, u32))`.
 - [`EngineConfig`](src/core.rs) — start-time options (app name, renderer kind).
 - [`RendererKind`](src/render/mod.rs) — `Simple | Batch | BigBuffer`.
   Maps from `--renderer` CLI strings via `RendererKind::from_cli`.
-- [`Sprite`](src/render/sprite.rs) — M2 textured-quad drawable. M3 replaces
-  this with the AS3 `Sprite2D` / `IRenderable` plumbing.
+- [`Sprite`](src/render/sprite.rs) — per-sprite CPU state (position, size,
+  velocity, tint). Mutate freely between frames.
+- [`SpriteMesh`](src/render/sprite.rs) — shared GPU geometry (unit-quad
+  vertex/index buffers) plus a single descriptor bound to a texture. One
+  per (geometry, texture) pair the engine draws.
 - [`Texture`](src/gfx/texture.rs) — owns a `vk::Image` + view + sampler.
   Build via `from_rgba(...)` or `from_png_bytes(...)`.
-- [`Vertex2D`](src/draw/vertex.rs) — pos/color/uv vertex. Mirrors the AS3
-  `VertexDataBinary` layout, widened to `vec4` color.
+- [`Vertex2D`](src/draw/vertex.rs) — pos/color/uv vertex. M3 uses unit-quad
+  local coords in `pos`; per-sprite world transform travels through the
+  push constant.
 - [`FrameClock`](src/time.rs) — delta time + smoothed FPS.
 
 ## Module map vs. the AS3 sources
@@ -33,9 +37,9 @@ use exey_engine::{Engine, EngineConfig, RendererKind, FrameClock, Sprite, Textur
 | `exey.engine.stage3d.VertexDataBinary`        | `draw::Vertex2D`                                         |
 | `exey.engine.render.RenderCore`               | `render::RenderCore`                                     |
 | `exey.engine.render.renderers.IRenderer`      | `render::IRenderer`                                      |
-| `exey.engine.render.renderers.SimpleRenderer` | `render::SimpleRenderer` (M2; functional)                |
-| `exey.engine.render.renderers.BatchRenderer`  | `render::BatchRenderer` (M2 stub → M6)                   |
-| `exey.engine.render.renderers.BigBufferRenderer` | `render::BigBufferRenderer` (M2 stub → M6) ★          |
+| `exey.engine.render.renderers.SimpleRenderer` | `render::SimpleRenderer` (M3; functional, one draw/sprite) |
+| `exey.engine.render.renderers.BatchRenderer`  | `render::BatchRenderer` (M3 stub → M5)                   |
+| `exey.engine.render.renderers.BigBufferRenderer` | `render::BigBufferRenderer` (M3 stub → M6) ★          |
 | `exey.engine.render.sorting.ISorter`          | `render::sort::ISorter`                                  |
 | `exey.engine.render.sorting.IsometricRectangleSorter` | `render::sort::iso_rect` (M5) ★                  |
 | `exey.engine.render.sorting.ScreenYSorter`    | `render::sort::screen_y`                                 |

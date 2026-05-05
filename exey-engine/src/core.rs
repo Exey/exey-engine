@@ -68,10 +68,18 @@ impl Engine {
         self.needs_recreate = true;
     }
 
-    /// Draw one frame. `sprites` is the list to render this frame —
-    /// the demo owns the sprite resources and passes them in by reference.
-    /// Empty slice = clear-only frame (the M1 behaviour).
-    pub fn draw_frame(&mut self, window: &Window, sprites: &[&Sprite]) -> Result<()> {
+    /// Draw one frame.
+    ///
+    /// * `mesh`    — shared unit-quad geometry + texture descriptor (M3
+    ///   demos own one of these and pass it in; M5+ may pass several).
+    /// * `sprites` — CPU-side state for sprites to draw this frame. Empty
+    ///   slice = clear-only frame.
+    pub fn draw_frame(
+        &mut self,
+        window: &Window,
+        mesh: &crate::render::SpriteMesh,
+        sprites: &[Sprite],
+    ) -> Result<()> {
         // Log only the first few frames in detail so we can confirm wiring
         // end-to-end without spamming the console at ~vsync rate. After
         // VERBOSE_FRAMES, this method is silent on the happy path.
@@ -135,6 +143,7 @@ impl Engine {
 
         let ctx = crate::render::RenderContext {
             pipeline,
+            mesh,
             extent,
             sprites,
             clear_color: clear,
