@@ -1,23 +1,34 @@
 //! IsometricWorldGenerator — demo for ExeyEngine.
 //!
-//! M3 scope: a flock of textured quads bouncing off the window edges.
-//! All sprites share one mesh + descriptor + pipeline; the demo updates
-//! sprite state (position via velocity, sign-flip on edge contact) per
-//! frame and the renderer issues one push-constant + draw per sprite.
-//! FPS in the title bar each second. Renderer choice via
-//! `--renderer simple|batch|bigbuffer` CLI flag (passed through from
-//! `run.sh`). All three currently produce the same output — Batch and
-//! BigBuffer ship their real algorithms in M5/M6.
+//! M4 scope: a 32×32 grid of iso-projected tiles drawn through an
+//! `IsometricCamera2D`. Tiles are placed by `iso::logic_to_world` so the
+//! grid renders as a flat diamond. The camera auto-fits the grid into
+//! the viewport (zoom + centred position computed at scene init), and
+//! its viewport is updated whenever the window resizes.
 //!
-//! Texture is a procedural 64×64 magenta/black checkerboard. M9 replaces
-//! it with the scrabling tileset (or any PNG dropped into `assets/`) once
-//! the TMX loader and map generator land.
+//! No motion in M4 — no flock, no pan. The milestone proves the iso
+//! math and the camera plumbing. M5 adds the iso-rectangle sorter, at
+//! which point we can start placing tiles at different heights and
+//! characters that can occlude tiles.
+//!
+//! Renderer choice via `--renderer simple|batch|bigbuffer` CLI flag
+//! (passed through from `run.sh`). All three currently produce the same
+//! output — Batch and BigBuffer ship their real algorithms in M5/M6.
+//!
+//! Texture is a procedural diamond — a filled iso-tile shape with a
+//! 1-pixel outline. M9 replaces it with the scrabling tileset (or any
+//! PNG dropped into `assets/`) once the TMX loader and map generator
+//! land.
 
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use anyhow::Result;
-use exey_engine::{Engine, EngineConfig, FrameClock, RendererKind, Sprite, SpriteMesh, Texture};
+use exey_engine::glam::Vec2;
+use exey_engine::{
+    Engine, EngineConfig, FrameClock, ICamera2D, IsometricCamera2D, RendererKind, Sprite,
+    SpriteMesh, Texture, iso,
+};
 use winit::application::ApplicationHandler;
 use winit::event::WindowEvent;
 use winit::event_loop::{ActiveEventLoop, ControlFlow, EventLoop};
@@ -26,16 +37,23 @@ use winit::window::{Window, WindowAttributes, WindowId};
 const WINDOW_W: u32 = 1280;
 const WINDOW_H: u32 = 720;
 
-/// Sprite count for the bouncing flock. Roughly the M3 deliverable size —
-/// big enough to stress the per-draw push-constant path, small enough that
-/// `SimpleRenderer` (one draw per sprite) still hits 60+ fps trivially.
-const FLOCK_SIZE: usize = 32;
-/// Edge length of each sprite, in framebuffer pixels.
-const SPRITE_PX: f32 = 64.0;
-/// Min/max initial speed magnitude per axis, in pixels per second. Sign is
-/// chosen at random, so actual range is [-MAX..-MIN] ∪ [MIN..MAX].
-const SPEED_MIN: f32 = 80.0;
-const SPEED_MAX: f32 = 220.0;
+/// Iso tile size, in world pixels. The "2:1 isometric" convention has
+/// `tile_w = 2 * tile_h`. Only `tile_h` participates in the projection
+/// math; `tile_w` is the rendered sprite width.
+const TILE_W: f32 = 64.0;
+const TILE_H: f32 = 32.0;
+
+/// Grid dimensions. 32×32 = 1024 tiles. SimpleRenderer issues one draw
+/// per tile, so this exercises the per-frame push-constant path at a
+/// scale where M5/M6 will start to win.
+const GRID_W: usize = 32;
+const GRID_H: usize = 32;
+
+/// Visual margin between auto-fit zoom and the actual viewport edges,
+/// expressed as a multiplicative factor on the computed zoom. 0.95
+/// leaves a small breathing room so the corner tiles aren't flush against
+/// the window edge.
+const ZOOM_FIT_MARGIN: f32 = 0.95;
 
 /// CLI args. Tiny hand-rolled parser — pulling in `clap` for one flag is
 /// overkill at M2. Add more flags as the demo grows.
@@ -150,78 +168,89 @@ fn main() -> Result<()> {
     Ok(())
 }
 
-/// Tiny linear congruential generator for deterministic seeded randomness.
-/// Pulling in `rand` for one initialization pass would be overkill; this
-/// is good enough to scatter sprite positions and velocities.
+/// Build a procedural diamond texture: a filled iso-tile shape with a
+/// 1-pixel outline. The texture is `tile_w × tile_h` pixels — the same
+/// dimensions as the rendered sprite — so UV [0..1] maps 1:1 to the
+/// diamond. Pixels outside the diamond shape are fully transparent so
+/// the alpha-blend pipeline cuts them out cleanly.
 ///
-/// Constants from Numerical Recipes (LCG with full period over u32).
-struct Lcg(u32);
-impl Lcg {
-    fn new(seed: u32) -> Self {
-        // Avoid zero-state which would lock the LCG at zero.
-        Self(if seed == 0 { 0x1234_5678 } else { seed })
+/// Diamond test: a pixel `(x, y)` is inside the iso diamond iff
+/// `|x - cx|/cx + |y - cy|/cy <= 1` (centre at `(cx, cy)`, half-extents
+/// `(cx, cy)`).
+fn build_diamond_rgba(tile_w: u32, tile_h: u32) -> Vec<u8> {
+    let mut rgba = vec![0u8; (tile_w * tile_h * 4) as usize];
+    let cx = (tile_w - 1) as f32 * 0.5;
+    let cy = (tile_h - 1) as f32 * 0.5;
+    for y in 0..tile_h {
+        for x in 0..tile_w {
+            let nx = (x as f32 - cx).abs() / cx;
+            let ny = (y as f32 - cy).abs() / cy;
+            let d = nx + ny;
+            let i = ((y * tile_w + x) * 4) as usize;
+            if d <= 1.0 {
+                // Inside the diamond. Outline ring near d=1, fill below.
+                let outline_zone = 0.94;
+                if d > outline_zone {
+                    // Dark outline (almost black with a hint of warmth).
+                    rgba[i]     = 32;
+                    rgba[i + 1] = 24;
+                    rgba[i + 2] = 16;
+                    rgba[i + 3] = 255;
+                } else {
+                    // Subtle vertical gradient inside the tile so adjacent
+                    // tiles are visually distinguishable when packed.
+                    let t = y as f32 / tile_h as f32;
+                    let lo = 0.55;
+                    let hi = 0.85;
+                    let v = lo + (hi - lo) * (1.0 - t);
+                    rgba[i]     = (110.0 * v) as u8;  // R: muted earthy
+                    rgba[i + 1] = (165.0 * v) as u8;  // G: greenish
+                    rgba[i + 2] = (95.0 * v) as u8;   // B: low
+                    rgba[i + 3] = 255;
+                }
+            } else {
+                // Outside the diamond — fully transparent.
+                rgba[i] = 0;
+                rgba[i + 1] = 0;
+                rgba[i + 2] = 0;
+                rgba[i + 3] = 0;
+            }
+        }
     }
-    fn next_u32(&mut self) -> u32 {
-        self.0 = self.0.wrapping_mul(1_664_525).wrapping_add(1_013_904_223);
-        self.0
-    }
-    /// Uniform float in [0, 1).
-    fn next_f32(&mut self) -> f32 {
-        // Take the high 24 bits so the result fits in f32's mantissa
-        // without precision loss.
-        (self.next_u32() >> 8) as f32 / (1u32 << 24) as f32
-    }
-    /// Uniform float in [lo, hi).
-    fn next_f32_in(&mut self, lo: f32, hi: f32) -> f32 {
-        lo + self.next_f32() * (hi - lo)
-    }
-    /// +1.0 or -1.0 with equal probability.
-    fn next_sign(&mut self) -> f32 {
-        if self.next_u32() & 1 == 0 { 1.0 } else { -1.0 }
-    }
+    rgba
 }
 
 struct Scene {
-    /// Shared GPU geometry + texture descriptor for the flock. All sprites
-    /// share this — the per-sprite differences travel through push constants.
+    /// Shared GPU geometry + texture descriptor. All tiles share this.
     mesh: SpriteMesh,
-    /// Texture backing the mesh. Kept here so its drop runs when the scene
-    /// drops; the descriptor in `mesh` references it.
+    /// Texture backing the mesh (the diamond). Kept here so its drop runs
+    /// when the scene drops; the descriptor in `mesh` references it.
     texture: Texture,
-    /// CPU state for each sprite. Mutated each frame by `tick`.
+    /// One [`Sprite`] per grid cell, in row-major order
+    /// `idx = grid_y * GRID_W + grid_x`.
     sprites: Vec<Sprite>,
+    /// The iso-projected world camera. Demo-owned so we can update its
+    /// viewport on resize and (later) pan/zoom.
+    camera: IsometricCamera2D,
 }
 
 impl Scene {
     fn new(engine: &Engine) -> Result<Self> {
-        log::info!("Scene::new — building procedural checkerboard + flock of {FLOCK_SIZE} sprites");
+        log::info!(
+            "Scene::new — building {GRID_W}×{GRID_H} iso grid \
+             ({} tiles, tile {TILE_W}×{TILE_H})",
+            GRID_W * GRID_H,
+        );
 
-        // 64×64 magenta-on-black checkerboard, 8×8-pixel cells. Bright enough
-        // to be unmistakable when rendered, generic enough to also serve as a
-        // sanity check for sampler / format configuration.
-        let tile_size: u32 = 64;
-        let cell: u32 = 8;
-        let mut rgba = vec![0u8; (tile_size * tile_size * 4) as usize];
-        for y in 0..tile_size {
-            for x in 0..tile_size {
-                let on = ((x / cell) + (y / cell)) % 2 == 0;
-                let i = ((y * tile_size + x) * 4) as usize;
-                if on {
-                    rgba[i] = 255; // R
-                    rgba[i + 1] = 0; // G
-                    rgba[i + 2] = 255; // B
-                    rgba[i + 3] = 255; // A
-                } else {
-                    rgba[i] = 16;
-                    rgba[i + 1] = 16;
-                    rgba[i + 2] = 16;
-                    rgba[i + 3] = 255;
-                }
-            }
-        }
-
+        // Diamond texture sized to the iso tile: width = 2 * tile_h,
+        // height = tile_h. Use power-of-two-friendly multiples just in
+        // case (current sampler is NEAREST so no mipmaps; this stays
+        // OK for pixel-art-style tiles).
+        let tex_w = TILE_W as u32;
+        let tex_h = TILE_H as u32;
+        let rgba = build_diamond_rgba(tex_w, tex_h);
         let texture =
-            Texture::from_rgba(&engine.instance, &engine.device, tile_size, tile_size, &rgba)?;
+            Texture::from_rgba(&engine.instance, &engine.device, tex_w, tex_h, &rgba)?;
 
         let mesh = SpriteMesh::unit_quad(
             &engine.instance,
@@ -230,63 +259,85 @@ impl Scene {
             &texture,
         )?;
 
-        // Spawn the flock with a deterministic seed so successive runs
-        // produce the same starting layout — useful for debugging.
-        let mut rng = Lcg::new(0xC0FFEE);
-        // Use the *logical* window dimensions to bound spawn positions.
-        // The renderer scales by the actual framebuffer extent at draw
-        // time, so initial layout looks the same on retina vs non-retina.
-        let bound_w = WINDOW_W as f32;
-        let bound_h = WINDOW_H as f32;
-        let sprites: Vec<Sprite> = (0..FLOCK_SIZE)
-            .map(|_| {
-                let x = rng.next_f32_in(0.0, bound_w - SPRITE_PX);
-                let y = rng.next_f32_in(0.0, bound_h - SPRITE_PX);
-                let vx = rng.next_sign() * rng.next_f32_in(SPEED_MIN, SPEED_MAX);
-                let vy = rng.next_sign() * rng.next_f32_in(SPEED_MIN, SPEED_MAX);
-                // Slight per-sprite tint variation for visual interest.
-                // Pure white is the default; we lerp toward a random hue
-                // by ~20% so the flock isn't a uniform mass.
-                let r = 0.8 + 0.2 * rng.next_f32();
-                let g = 0.8 + 0.2 * rng.next_f32();
-                let b = 0.8 + 0.2 * rng.next_f32();
-                Sprite::new([x, y], [SPRITE_PX, SPRITE_PX], [vx, vy], [r, g, b, 1.0])
-            })
-            .collect();
-
-        log::info!("Scene::new — done (sprites in logical {bound_w}x{bound_h})");
-        Ok(Self { mesh, texture, sprites })
-    }
-
-    /// Advance one frame: integrate velocity, bounce off the framebuffer
-    /// edges. `extent` is the *physical* framebuffer size in pixels —
-    /// what the renderer actually rasterizes against. We bounce in that
-    /// space because bouncing in logical pixels would let sprites drift
-    /// off-screen on retina displays where physical > logical.
-    fn tick(&mut self, dt: f32, extent: (u32, u32)) {
-        let w = extent.0 as f32;
-        let h = extent.1 as f32;
-        for s in self.sprites.iter_mut() {
-            s.pos[0] += s.velocity[0] * dt;
-            s.pos[1] += s.velocity[1] * dt;
-            // Clamp to the bounce arena and reverse velocity on contact.
-            // We test both sides; a sprite small enough to overshoot per
-            // frame would still resolve correctly because we re-clamp.
-            if s.pos[0] < 0.0 {
-                s.pos[0] = 0.0;
-                s.velocity[0] = -s.velocity[0];
-            } else if s.pos[0] + s.size[0] > w {
-                s.pos[0] = w - s.size[0];
-                s.velocity[0] = -s.velocity[0];
-            }
-            if s.pos[1] < 0.0 {
-                s.pos[1] = 0.0;
-                s.velocity[1] = -s.velocity[1];
-            } else if s.pos[1] + s.size[1] > h {
-                s.pos[1] = h - s.size[1];
-                s.velocity[1] = -s.velocity[1];
+        // Build the grid. Each tile's sprite top-left is the diamond's
+        // top-left bounding-box corner, so we render the iso diamond
+        // texture in a quad of size (tile_w × tile_h) at world position
+        //
+        //   sprite_pos = iso::logic_to_world(grid, tile_h) - (tile_w/2, 0)
+        //
+        // The `-(tile_w/2, 0)` shifts the diamond so its *top* corner
+        // lands at the iso world position (which is what the iso math
+        // returns — the canonical AS3 convention).
+        //
+        // Light per-tile tint variation so the grid doesn't look flat;
+        // we modulate by (gx + gy) parity for a checkerboard hint and
+        // a small linear gradient across the grid.
+        let mut sprites = Vec::with_capacity(GRID_W * GRID_H);
+        for gy in 0..GRID_H {
+            for gx in 0..GRID_W {
+                let g = Vec2::new(gx as f32, gy as f32);
+                let world = iso::logic_to_world(g, TILE_H);
+                let pos = [world.x - TILE_W * 0.5, world.y];
+                // Tint: parity-based light/dark + a small gradient so we
+                // can visually trace rows/columns when debugging.
+                let parity = (gx + gy) % 2 == 0;
+                let base = if parity { 1.0 } else { 0.85 };
+                let tint = [
+                    base * (0.85 + 0.15 * (gx as f32 / GRID_W as f32)),
+                    base,
+                    base * (0.85 + 0.15 * (gy as f32 / GRID_H as f32)),
+                    1.0,
+                ];
+                sprites.push(Sprite::new(pos, [TILE_W, TILE_H], [0.0, 0.0], tint));
             }
         }
+        log::info!("Scene::new — built {} sprites", sprites.len());
+
+        // Compute camera state. Centre on the grid's bounding-box centre
+        // and zoom to fit the diamond into the viewport with a margin.
+        //
+        // Grid bounding box in world space (32×32 grid, tile_h=32):
+        //   gx=GRID_W-1, gy=0       → world (+992, +496)   max world_x
+        //   gx=0,        gy=GRID_H-1→ world (-992, +496)   min world_x
+        //   gx=0,        gy=0       → world (   0,    0)   min world_y
+        //   gx=GRID_W-1, gy=GRID_H-1→ world (   0, +992)   max world_y
+        // Each rendered tile sprite extends `tile_w/2` further in ±x
+        // (sprite top-left is `world - tile_w/2`) and `tile_h` further
+        // in +y (sprite spans `[world_y, world_y + tile_h]`).
+        // So rendered bbox: x ∈ [-(GRID_H-1)*tile_h - tile_w/2 ..
+        //                          +(GRID_W-1)*tile_h + tile_w/2],
+        //                   y ∈ [0 .. (GRID_W+GRID_H-2)*tile_h/2 + tile_h].
+        let world_w =
+            TILE_H * 2.0 * (GRID_W.max(GRID_H) as f32 - 1.0) + TILE_W;
+        let world_h =
+            TILE_H * (GRID_W + GRID_H - 2) as f32 * 0.5 + TILE_H;
+        let centre_x = 0.0; // diamond is symmetric in x around 0
+        let centre_y = world_h * 0.5;
+
+        let viewport = Vec2::new(WINDOW_W as f32, WINDOW_H as f32);
+        let zoom_x = viewport.x / world_w;
+        let zoom_y = viewport.y / world_h;
+        let zoom = zoom_x.min(zoom_y) * ZOOM_FIT_MARGIN;
+
+        let mut camera = IsometricCamera2D::new();
+        camera.state.position = Vec2::new(centre_x, centre_y);
+        camera.state.zoom = zoom;
+        camera.state.viewport = viewport;
+        log::info!(
+            "Scene::new — camera centre=({centre_x:.1},{centre_y:.1}) zoom={zoom:.4} \
+             viewport={WINDOW_W}×{WINDOW_H}  world_bbox≈{world_w:.0}×{world_h:.0}",
+        );
+
+        Ok(Self { mesh, texture, sprites, camera })
+    }
+
+    /// Update the camera viewport when the window resizes. The camera's
+    /// auto-fit zoom isn't recomputed — keeping the original zoom means
+    /// the grid stays at the same world-pixel scale, just with more or
+    /// less margin around it. Re-fitting is a one-line change if we want
+    /// it later.
+    fn on_resize(&mut self, width: u32, height: u32) {
+        self.camera.state.viewport = Vec2::new(width as f32, height as f32);
     }
 
     fn destroy(&mut self, engine: &Engine) {
@@ -397,23 +448,21 @@ impl ApplicationHandler for App {
                 if let Some(engine) = self.engine.as_mut() {
                     engine.on_resize((size.width, size.height));
                 }
+                // Camera viewport tracks the framebuffer extent so the
+                // world→clip transform stays correct after the swapchain
+                // recreates.
+                if let Some(scene) = self.scene.as_mut() {
+                    scene.on_resize(size.width, size.height);
+                }
             }
             WindowEvent::RedrawRequested => {
-                let dt = self.clock.tick();
+                let _dt = self.clock.tick(); // M4: no scene motion; kept for the FPS counter.
                 if let (Some(engine), Some(scene)) =
-                    (self.engine.as_mut(), self.scene.as_mut())
+                    (self.engine.as_mut(), self.scene.as_ref())
                 {
-                    // Advance simulation in framebuffer-pixel space so the
-                    // bounce arena matches the actual visible region (retina-
-                    // aware). Cap dt to avoid sprites teleporting if the
-                    // event loop hiccuped — 50 ms = 1 frame at 20 fps.
-                    let dt = dt.min(0.05);
-                    let extent = (
-                        engine.swapchain.extent.width,
-                        engine.swapchain.extent.height,
-                    );
-                    scene.tick(dt, extent);
-                    if let Err(e) = engine.draw_frame(&window, &scene.mesh, &scene.sprites) {
+                    if let Err(e) =
+                        engine.draw_frame(&window, &scene.camera, &scene.mesh, &scene.sprites)
+                    {
                         log::error!("draw_frame: {e:#}");
                         event_loop.exit();
                     }
@@ -422,9 +471,10 @@ impl ApplicationHandler for App {
                 // M1/M2 FPS indicator; an in-window text overlay arrives in M8.
                 if self.last_fps_print.elapsed() >= Duration::from_millis(500) {
                     let title = format!(
-                        "IsometricWorldGenerator [{}]  {:.0} fps",
+                        "IsometricWorldGenerator [{}]  {:.0} fps  ({} tiles)",
                         self.config.renderer.as_str(),
-                        self.clock.fps()
+                        self.clock.fps(),
+                        GRID_W * GRID_H,
                     );
                     window.set_title(&title);
                     self.last_fps_print = Instant::now();

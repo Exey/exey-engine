@@ -72,11 +72,15 @@ impl Engine {
     ///
     /// * `mesh`    — shared unit-quad geometry + texture descriptor (M3
     ///   demos own one of these and pass it in; M5+ may pass several).
+    /// * `camera`  — the camera whose view transform applies to this frame.
+    ///   The engine reads its position/zoom/viewport and computes the
+    ///   `(view_scale, view_offset)` push-constant fields from them.
     /// * `sprites` — CPU-side state for sprites to draw this frame. Empty
     ///   slice = clear-only frame.
     pub fn draw_frame(
         &mut self,
         window: &Window,
+        camera: &dyn crate::render::ICamera2D,
         mesh: &crate::render::SpriteMesh,
         sprites: &[Sprite],
     ) -> Result<()> {
@@ -128,6 +132,11 @@ impl Engine {
         let pipeline = &self.render.sprite_pipeline;
         let clear = self.render.clear_color;
         let renderer = &mut self.render.renderer;
+        // Read the camera's view transform once per frame. The renderer
+        // copies it into every push constant. We could cache this on the
+        // engine when the camera changes, but at 1024 sprites × ~20 ns
+        // per copy it's cheaper than the bookkeeping.
+        let view = camera.view_transform();
 
         if verbose {
             log::info!(
@@ -139,12 +148,18 @@ impl Engine {
                 sprites.len(),
                 renderer.kind(),
             );
+            log::info!(
+                "  view: scale=({:.4},{:.4})  offset=({:.4},{:.4})",
+                view.view_scale[0], view.view_scale[1],
+                view.view_offset[0], view.view_offset[1],
+            );
         }
 
         let ctx = crate::render::RenderContext {
             pipeline,
             mesh,
             extent,
+            view,
             sprites,
             clear_color: clear,
             verbose,

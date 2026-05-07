@@ -16,17 +16,19 @@
 //! ```text
 //!   offset  size  field
 //!   ------  ----  -----
-//!     0      8    vec2 screen_scale  // 2.0/extent.{w,h}, pixel → NDC scale
-//!     8      8    vec2 screen_offset // (-1, -1), shift origin to top-left
-//!    16      8    vec2 world_pos     // per-sprite top-left in pixels
-//!    24      8    vec2 world_size    // per-sprite size in pixels
-//!    32     16    vec4 tint          // per-draw color modulator (default [1;4])
+//!     0      8    vec2 view_scale   // camera world→clip x/y scale
+//!     8      8    vec2 view_offset  // camera world→clip x/y offset
+//!    16      8    vec2 world_pos    // per-sprite top-left in world pixels
+//!    24      8    vec2 world_size   // per-sprite size in world pixels
+//!    32     16    vec4 tint         // per-draw color modulator (default [1;4])
 //! ```
 //!
 //! Total: 48 bytes — well under the 128-byte Vulkan minimum guarantee.
-//! Widened from 32 bytes in M2: vertex coords are now unit-quad local [0..1],
-//! and the per-sprite world transform travels through the push constant so
-//! many sprites can share a single vertex/index buffer.
+//! In M4 the per-frame fields were renamed `screen_*` → `view_*` to
+//! reflect that they now encode the camera's full world→clip transform
+//! (pan + zoom + ortho), not just a fixed pixel→clip mapping. The byte
+//! layout is unchanged — same `vec2 vec2 vec2 vec2 vec4` totalling 48
+//! bytes — so this is a semantic rename only.
 //!
 //! Dynamic state covers viewport and scissor so we don't rebuild the pipeline
 //! on resize. Color attachment format must match the swapchain at pipeline
@@ -53,13 +55,14 @@ pub const MAX_TEXTURES: u32 = 64;
 #[repr(C)]
 #[derive(Copy, Clone, Debug, Pod, Zeroable)]
 pub struct SpritePushConstants {
-    /// 2/extent — multiplied with pixel coords to scale into NDC range.
-    pub screen_scale: [f32; 2],
-    /// (-1, -1) — shift origin from top-left pixel (0,0) to NDC (-1, -1).
-    pub screen_offset: [f32; 2],
-    /// Per-sprite top-left in pixels.
+    /// World→clip x/y scale, derived from the camera's viewport + zoom.
+    /// See [`crate::render::camera::ViewTransform`].
+    pub view_scale: [f32; 2],
+    /// World→clip x/y offset, derived from the camera's position + zoom.
+    pub view_offset: [f32; 2],
+    /// Per-sprite top-left in world pixels.
     pub world_pos: [f32; 2],
-    /// Per-sprite size in pixels.
+    /// Per-sprite size in world pixels.
     pub world_size: [f32; 2],
     /// Per-draw color modulator, multiplied into the per-vertex color.
     pub tint: [f32; 4],
@@ -73,34 +76,36 @@ pub struct SpritePushConstants {
 // e.g. `vec3` followed by `f32` packs differently in std430 than in repr(C).
 
 impl SpritePushConstants {
-    /// Build the per-frame screen → NDC mapping. The per-sprite fields
-    /// (`world_pos`, `world_size`, `tint`) are left at defaults; the
-    /// renderer overwrites them per draw.
-    pub fn for_extent(extent: vk::Extent2D) -> Self {
-        let w = extent.width.max(1) as f32;
-        let h = extent.height.max(1) as f32;
+    /// Build a push constant pre-filled with the camera's view transform.
+    /// The per-sprite fields are left at defaults; the renderer
+    /// overwrites them per draw via [`Self::with_sprite`] or by direct
+    /// field assignment.
+    pub fn for_view(view: crate::render::camera::ViewTransform) -> Self {
         Self {
-            screen_scale: [2.0 / w, 2.0 / h],
-            screen_offset: [-1.0, -1.0],
+            view_scale: view.view_scale,
+            view_offset: view.view_offset,
             world_pos: [0.0, 0.0],
             world_size: [0.0, 0.0],
             tint: [1.0, 1.0, 1.0, 1.0],
         }
     }
 
-    /// Convenience: same as [`Self::for_extent`] but also fills in the
-    /// per-sprite fields. Used by the renderer right before each draw.
+    /// Convenience: build a push constant with both the per-frame view
+    /// transform and the per-sprite fields filled in. Used by the renderer
+    /// right before each draw.
     pub fn for_sprite(
-        extent: vk::Extent2D,
+        view: crate::render::camera::ViewTransform,
         world_pos: [f32; 2],
         world_size: [f32; 2],
         tint: [f32; 4],
     ) -> Self {
-        let mut pc = Self::for_extent(extent);
-        pc.world_pos = world_pos;
-        pc.world_size = world_size;
-        pc.tint = tint;
-        pc
+        Self {
+            view_scale: view.view_scale,
+            view_offset: view.view_offset,
+            world_pos,
+            world_size,
+            tint,
+        }
     }
 }
 

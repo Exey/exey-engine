@@ -12,6 +12,7 @@
 //! flag (`--renderer simple|batch|bigbuffer`).
 
 pub mod camera;
+pub mod iso;
 pub mod sort;
 pub mod sprite;
 pub mod sprite_pipeline;
@@ -21,6 +22,7 @@ use vulkanalia::prelude::v1_0::*;
 
 use crate::gfx::{Device, Swapchain};
 
+pub use camera::{ICamera2D, IsometricCamera2D, SimpleCamera2D, ViewTransform};
 pub use sprite::{Sprite, SpriteMesh};
 pub use sprite_pipeline::{SpritePipeline, SpritePushConstants};
 
@@ -60,19 +62,23 @@ impl RendererKind {
 
 /// Per-frame data passed from `RenderCore` into [`IRenderer::record`].
 ///
-/// In M3 the context carries:
+/// In M4 the context carries:
 /// * `pipeline` — the textured-quad pipeline (shared)
 /// * `mesh` — the shared unit-quad geometry + texture descriptor
-/// * `extent` — framebuffer size in pixels (for the screen→clip transform)
+/// * `extent` — framebuffer size in pixels (used for viewport/scissor;
+///   *not* used for the world→clip transform any more — the view does that)
+/// * `view` — the camera's world→clip transform for this frame, written
+///   into every push constant
 /// * `sprites` — CPU-side state for the sprites to draw this frame
 /// * `clear_color`, `verbose` — orchestration / diagnostics
 ///
-/// M4 will add the camera; M6 will let the BigBuffer renderer access the
-/// streaming vertex pool through here.
+/// M6 will let the BigBuffer renderer access the streaming vertex pool
+/// through here.
 pub struct RenderContext<'a> {
     pub pipeline: &'a SpritePipeline,
     pub mesh: &'a SpriteMesh,
     pub extent: vk::Extent2D,
+    pub view: ViewTransform,
     pub sprites: &'a [Sprite],
     pub clear_color: [f32; 4],
     /// Diagnostic logging toggle. The engine sets this for the first few
@@ -143,10 +149,10 @@ impl IRenderer for SimpleRenderer {
         ctx.mesh.bind(device, cb, ctx.pipeline);
         // Per-sprite: write push constant, draw indexed. Each sprite is
         // 6 indices = 1 quad. The push constant is fully overwritten each
-        // call, so screen-scale/offset are written redundantly — cheap.
+        // call, so view scale/offset are written redundantly — cheap.
         for (i, sprite) in ctx.sprites.iter().enumerate() {
             let pc = SpritePushConstants::for_sprite(
-                ctx.extent,
+                ctx.view,
                 sprite.pos,
                 sprite.size,
                 sprite.tint,

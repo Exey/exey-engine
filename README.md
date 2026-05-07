@@ -148,8 +148,9 @@ is fine. For everything else, use the topological sorter.
 ## Status
 
 This document covers M1 (window + clear color + FPS + renderer-selection CLI),
-M2 (one textured quad), and M3 (bouncing flock of textured sprites). See
-[`PLAN.md`](PLAN.md) for the milestone roadmap.
+M2 (one textured quad), M3 (bouncing flock of textured sprites), and M4
+(`IsometricCamera2D` + iso grid). See [`PLAN.md`](PLAN.md) for the
+milestone roadmap.
 
 ## Credits
 

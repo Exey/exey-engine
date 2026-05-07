@@ -1,6 +1,6 @@
 #version 450
 //
-// sprite.vert — M3 vertex shader.
+// sprite.vert — M4 vertex shader.
 //
 // Input vertex layout matches `draw::Vertex2D` (engine-side struct):
 //   location 0 — vec2 position in unit-quad local space, range [0..1]
@@ -8,21 +8,25 @@
 //   location 2 — vec2 texture UV in [0..1]
 //
 // The push constant encodes:
-//   - per-frame:  screen_scale, screen_offset    — pixel→clip transform
-//   - per-sprite: world_pos, world_size          — top-left and size in pixels
-//   - per-sprite: tint                           — multiplied into vertex color
+//   - per-frame:  view_scale, view_offset    — world→clip transform from camera
+//   - per-sprite: world_pos, world_size      — top-left and size in world pixels
+//   - per-sprite: tint                        — multiplied into vertex color
 //
-// World transform: pixel_pos = local * world_size + world_pos
-// Clip transform:  ndc.xy    = pixel_pos * screen_scale + screen_offset
+// World transform: world_pixel = local * world_size + world_pos
+// Camera transform: ndc.xy     = world_pixel * view_scale + view_offset
 //
-// With `screen_scale = 2/extent` and `screen_offset = (-1, -1)` we get pixel
-// coords with origin at the top-left of the framebuffer. Both transforms
-// stand in for a real ortho projection until M4 wires up `IsometricCamera2D`.
+// `view_scale` and `view_offset` come from the camera's view_transform()
+// (see exey-engine/src/render/camera). For a default camera at pos=0
+// zoom=1 with a 1280×720 viewport, this produces:
+//   view_scale = (2/1280, 2/720)    →  world pixels scaled to NDC range
+//   view_offset = (0, 0)             →  world origin at NDC origin (screen centre)
+// Panning the camera shifts view_offset; zooming scales view_scale.
 //
-// CHANGED IN M3 from M2: vertex `in_pos` is now [0..1] local coords, not
-// pixel coords. The push constant gained `world_pos`/`world_size`. This lets
-// every sprite share the same vertex/index buffers — only the push constant
-// differs per draw.
+// CHANGED IN M4 from M3: per-frame fields renamed `screen_*` → `view_*`
+// to reflect that they now encode the camera's full view transform
+// (pan + zoom + ortho), not just a fixed pixel→clip mapping. The byte
+// layout is identical — same `vec2 vec2 vec2 vec2 vec4` totalling 48
+// bytes, same offsets — so this is a semantic rename only.
 
 layout(location = 0) in vec2 in_pos;
 layout(location = 1) in vec4 in_color;
@@ -32,17 +36,17 @@ layout(location = 0) out vec4 v_color;
 layout(location = 1) out vec2 v_uv;
 
 layout(push_constant) uniform PushConstants {
-    vec2 screen_scale;
-    vec2 screen_offset;
+    vec2 view_scale;
+    vec2 view_offset;
     vec2 world_pos;
     vec2 world_size;
     vec4 tint;
 } pc;
 
 void main() {
-    vec2 pixel_pos = in_pos * pc.world_size + pc.world_pos;
-    vec2 ndc      = pixel_pos * pc.screen_scale + pc.screen_offset;
-    gl_Position   = vec4(ndc, 0.0, 1.0);
-    v_color       = in_color * pc.tint;
-    v_uv          = in_uv;
+    vec2 world_pixel = in_pos * pc.world_size + pc.world_pos;
+    vec2 ndc        = world_pixel * pc.view_scale + pc.view_offset;
+    gl_Position     = vec4(ndc, 0.0, 1.0);
+    v_color         = in_color * pc.tint;
+    v_uv            = in_uv;
 }

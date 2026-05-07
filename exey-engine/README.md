@@ -12,10 +12,17 @@ use exey_engine::{Engine, EngineConfig, RendererKind, FrameClock, Sprite, Textur
 ```
 
 - [`Engine`](src/core.rs) — the equivalent of `ExeyEngineCore`. Owns Vulkan,
-  exposes `draw_frame(&Window, &SpriteMesh, &[Sprite])`, `on_resize((u32, u32))`.
+  exposes `draw_frame(&Window, &dyn ICamera2D, &SpriteMesh, &[Sprite])`,
+  `on_resize((u32, u32))`.
 - [`EngineConfig`](src/core.rs) — start-time options (app name, renderer kind).
 - [`RendererKind`](src/render/mod.rs) — `Simple | Batch | BigBuffer`.
   Maps from `--renderer` CLI strings via `RendererKind::from_cli`.
+- [`ICamera2D`](src/render/camera/mod.rs) — camera interface. Two
+  concrete kinds: `SimpleCamera2D` for screen-space content, `IsometricCamera2D`
+  for world-space content. Both share `AbstractCamera2D` state (position,
+  zoom, viewport).
+- [`iso`](src/render/iso.rs) — logic↔world conversions for the 2:1 iso
+  projection. Mirrors AS3 `IsoUtil.spaceToScreen` / `screenToSpace`.
 - [`Sprite`](src/render/sprite.rs) — per-sprite CPU state (position, size,
   velocity, tint). Mutate freely between frames.
 - [`SpriteMesh`](src/render/sprite.rs) — shared GPU geometry (unit-quad
@@ -23,7 +30,7 @@ use exey_engine::{Engine, EngineConfig, RendererKind, FrameClock, Sprite, Textur
   per (geometry, texture) pair the engine draws.
 - [`Texture`](src/gfx/texture.rs) — owns a `vk::Image` + view + sampler.
   Build via `from_rgba(...)` or `from_png_bytes(...)`.
-- [`Vertex2D`](src/draw/vertex.rs) — pos/color/uv vertex. M3 uses unit-quad
+- [`Vertex2D`](src/draw/vertex.rs) — pos/color/uv vertex. M3+ uses unit-quad
   local coords in `pos`; per-sprite world transform travels through the
   push constant.
 - [`FrameClock`](src/time.rs) — delta time + smoothed FPS.
@@ -43,7 +50,11 @@ use exey_engine::{Engine, EngineConfig, RendererKind, FrameClock, Sprite, Textur
 | `exey.engine.render.sorting.ISorter`          | `render::sort::ISorter`                                  |
 | `exey.engine.render.sorting.IsometricRectangleSorter` | `render::sort::iso_rect` (M5) ★                  |
 | `exey.engine.render.sorting.ScreenYSorter`    | `render::sort::screen_y`                                 |
-| `exey.engine.render.camera.*`                 | `render::camera`                                         |
+| `exey.engine.render.camera.AbstractCamera2D`  | `render::camera::AbstractCamera2D`                       |
+| `exey.engine.render.camera.ICamera2D`         | `render::camera::ICamera2D`                              |
+| `exey.engine.render.camera.SimpleCamera2D`    | `render::camera::SimpleCamera2D`                         |
+| `exey.engine.render.camera.IsometricCamera2D` | `render::camera::IsometricCamera2D`                      |
+| `exey.moss.utils.IsoUtil`                     | `render::iso` (`logic_to_world`, `world_to_logic`)       |
 | `exey.engine.draw.*`                          | `draw::*` (M3+)                                          |
 | `exey.engine.draw.animation.*`                | `draw::animation` (M7)                                   |
 
