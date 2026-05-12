@@ -62,24 +62,28 @@ impl RendererKind {
 
 /// Per-frame data passed from `RenderCore` into [`IRenderer::record`].
 ///
-/// In M4 the context carries:
+/// In M5 the context carries:
 /// * `pipeline` — the textured-quad pipeline (shared)
-/// * `mesh` — the shared unit-quad geometry + texture descriptor
-/// * `extent` — framebuffer size in pixels (used for viewport/scissor;
-///   *not* used for the world→clip transform any more — the view does that)
-/// * `view` — the camera's world→clip transform for this frame, written
-///   into every push constant
-/// * `sprites` — CPU-side state for the sprites to draw this frame
+/// * `meshes` — slice of [`SpriteMesh`]es; sprites pick which via `mesh_idx`
+/// * `extent` — framebuffer size in pixels (for viewport/scissor)
+/// * `view` — the camera's world→clip transform for this frame
+/// * `world_sprites` — sprites rendered with iso-sorted draw order
+/// * `world_sort_order` — permutation of `0..world_sprites.len()` from
+///   the iso sorter; the renderer iterates this rather than the slice directly
+/// * `gui_sprites` — sprites rendered after `world_sprites` in input order
+///   (overlay text, HUD, debug). Not sorted by the iso sorter.
 /// * `clear_color`, `verbose` — orchestration / diagnostics
 ///
 /// M6 will let the BigBuffer renderer access the streaming vertex pool
 /// through here.
 pub struct RenderContext<'a> {
     pub pipeline: &'a SpritePipeline,
-    pub mesh: &'a SpriteMesh,
+    pub meshes: &'a [&'a SpriteMesh],
     pub extent: vk::Extent2D,
     pub view: ViewTransform,
-    pub sprites: &'a [Sprite],
+    pub world_sprites: &'a [Sprite],
+    pub world_sort_order: &'a [u32],
+    pub gui_sprites: &'a [Sprite],
     pub clear_color: [f32; 4],
     /// Diagnostic logging toggle. The engine sets this for the first few
     /// frames after startup so we can confirm the renderer is actually
@@ -131,7 +135,8 @@ impl IRenderer for SimpleRenderer {
         Ok(())
     }
     fn record(&mut self, device: &Device, cb: vk::CommandBuffer, ctx: &RenderContext) {
-        if ctx.sprites.is_empty() {
+        let total = ctx.world_sprites.len() + ctx.gui_sprites.len();
+        if total == 0 {
             if ctx.verbose {
                 log::info!("  SimpleRenderer::record  → 0 sprites (clear-only frame)");
             }
@@ -139,34 +144,86 @@ impl IRenderer for SimpleRenderer {
         }
         if ctx.verbose {
             log::info!(
-                "  SimpleRenderer::record  → bind once, {} sprite(s) × (push_constants + draw)",
-                ctx.sprites.len()
+                "  SimpleRenderer::record  → world={} (sorted), gui={}, meshes={}",
+                ctx.world_sprites.len(), ctx.gui_sprites.len(), ctx.meshes.len(),
             );
         }
         // Per-frame state: pipeline + viewport/scissor.
         ctx.pipeline.bind(device, cb, ctx.extent);
-        // Shared mesh: vertex buffer, index buffer, descriptor set.
-        ctx.mesh.bind(device, cb, ctx.pipeline);
-        // Per-sprite: write push constant, draw indexed. Each sprite is
-        // 6 indices = 1 quad. The push constant is fully overwritten each
-        // call, so view scale/offset are written redundantly — cheap.
-        for (i, sprite) in ctx.sprites.iter().enumerate() {
-            let pc = SpritePushConstants::for_sprite(
-                ctx.view,
-                sprite.pos,
-                sprite.size,
-                sprite.tint,
-            );
-            ctx.pipeline.push_constants(device, cb, &pc);
+
+        // We rebind the mesh (vertex buffer + index buffer + descriptor)
+        // only when the sprite's mesh_idx changes from the last drawn
+        // sprite. Grouping sprites in input order minimises rebinds —
+        // for the M5 demo the world is tiles-then-buildings, so the
+        // mesh changes only once between groups.
+        let mut current_mesh_idx: Option<u8> = None;
+
+        // Helper to draw one sprite, handling mesh rebind. Inlined as
+        // a closure to keep the loop bodies single-purpose.
+        let pipeline = ctx.pipeline;
+        let meshes = ctx.meshes;
+        let view = ctx.view;
+        let mut draw_one = |sprite: &Sprite, current: &mut Option<u8>| {
+            // Clamp mesh_idx defensively — out-of-range falls back to 0,
+            // logged once per offending sprite (verbose only).
+            let mesh_idx = if (sprite.mesh_idx as usize) < meshes.len() {
+                sprite.mesh_idx
+            } else {
+                if ctx.verbose {
+                    log::warn!(
+                        "sprite.mesh_idx={} out of range (have {} meshes); using mesh 0",
+                        sprite.mesh_idx, meshes.len(),
+                    );
+                }
+                0
+            };
+            if current.map_or(true, |c| c != mesh_idx) {
+                meshes[mesh_idx as usize].bind(device, cb, pipeline);
+                *current = Some(mesh_idx);
+            }
+            let mesh = meshes[mesh_idx as usize];
+            let pc = SpritePushConstants::for_sprite(view, sprite);
+            pipeline.push_constants(device, cb, &pc);
             unsafe {
-                device.logical.cmd_draw_indexed(cb, ctx.mesh.index_count, 1, 0, 0, 0);
+                device.logical.cmd_draw_indexed(cb, mesh.index_count, 1, 0, 0, 0);
             }
-            if ctx.verbose && i < 3 {
-                log::info!(
-                    "    sprite[{i}]: pos=({:.1},{:.1}) size=({:.1},{:.1})",
-                    sprite.pos[0], sprite.pos[1], sprite.size[0], sprite.size[1],
+        };
+
+        // World sprites in sort order. Defensive: if sort_order is
+        // empty (no sorter ran) but sprites are present, draw them in
+        // input order — better than dropping them.
+        if !ctx.world_sprites.is_empty() {
+            if ctx.world_sort_order.len() == ctx.world_sprites.len() {
+                for (rank, &sprite_idx) in ctx.world_sort_order.iter().enumerate() {
+                    let sprite = &ctx.world_sprites[sprite_idx as usize];
+                    draw_one(sprite, &mut current_mesh_idx);
+                    if ctx.verbose && rank < 3 {
+                        log::info!(
+                            "    world[rank={rank} idx={sprite_idx}]: \
+                             pos=({:.1},{:.1}) iso=({:.1},{:.1})±({:.1},{:.1}) mesh={}",
+                            sprite.pos[0], sprite.pos[1],
+                            sprite.iso_grid[0], sprite.iso_grid[1],
+                            sprite.iso_grid_size[0], sprite.iso_grid_size[1],
+                            sprite.mesh_idx,
+                        );
+                    }
+                }
+            } else {
+                log::warn!(
+                    "world_sort_order length ({}) != world_sprites length ({}); \
+                     drawing in input order",
+                    ctx.world_sort_order.len(), ctx.world_sprites.len(),
                 );
+                for sprite in ctx.world_sprites {
+                    draw_one(sprite, &mut current_mesh_idx);
+                }
             }
+        }
+
+        // GUI sprites in input order, drawn after world. Iso sorter
+        // doesn't touch these.
+        for sprite in ctx.gui_sprites {
+            draw_one(sprite, &mut current_mesh_idx);
         }
     }
     fn destroy(&mut self, _device: &Device) {}
@@ -254,13 +311,16 @@ fn make_renderer(kind: RendererKind) -> Box<dyn IRenderer> {
     }
 }
 
-/// Top-level render orchestrator. M2 owns the [`SpritePipeline`] in addition
-/// to the renderer strategy; the demo borrows the pipeline to allocate
-/// descriptor sets for its textures.
+/// Top-level render orchestrator. Mirrors AS3 `RenderCore`. Owns the
+/// strategy renderer, the iso sorter, and the textured-quad pipeline.
 pub struct RenderCore {
     pub renderer: Box<dyn IRenderer>,
+    pub sorter: Box<dyn sort::ISorter>,
     pub sprite_pipeline: SpritePipeline,
     pub clear_color: [f32; 4],
+    /// Scratch buffer reused each frame for the iso bounds passed to
+    /// the sorter. Kept here to avoid per-frame allocation.
+    pub sort_bounds_scratch: Vec<sort::IsoBounds>,
 }
 
 impl RenderCore {
@@ -270,9 +330,11 @@ impl RenderCore {
         let sprite_pipeline = SpritePipeline::new(device, swapchain)?;
         Ok(Self {
             renderer,
+            sorter: Box::new(sort::IsometricRectangleSorter::new()),
             sprite_pipeline,
             // Cornflower blue. Easy to recognise, easy to spot stuck pipelines.
             clear_color: [0.39, 0.58, 0.93, 1.0],
+            sort_bounds_scratch: Vec::new(),
         })
     }
 

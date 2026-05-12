@@ -12,7 +12,7 @@ use exey_engine::{Engine, EngineConfig, RendererKind, FrameClock, Sprite, Textur
 ```
 
 - [`Engine`](src/core.rs) — the equivalent of `ExeyEngineCore`. Owns Vulkan,
-  exposes `draw_frame(&Window, &dyn ICamera2D, &SpriteMesh, &[Sprite])`,
+  exposes `draw_frame(&Window, &dyn ICamera2D, &[&SpriteMesh], world: &[Sprite], gui: &[Sprite])`,
   `on_resize((u32, u32))`.
 - [`EngineConfig`](src/core.rs) — start-time options (app name, renderer kind).
 - [`RendererKind`](src/render/mod.rs) — `Simple | Batch | BigBuffer`.
@@ -48,8 +48,8 @@ use exey_engine::{Engine, EngineConfig, RendererKind, FrameClock, Sprite, Textur
 | `exey.engine.render.renderers.BatchRenderer`  | `render::BatchRenderer` (M3 stub → M5)                   |
 | `exey.engine.render.renderers.BigBufferRenderer` | `render::BigBufferRenderer` (M3 stub → M6) ★          |
 | `exey.engine.render.sorting.ISorter`          | `render::sort::ISorter`                                  |
-| `exey.engine.render.sorting.IsometricRectangleSorter` | `render::sort::iso_rect` (M5) ★                  |
-| `exey.engine.render.sorting.ScreenYSorter`    | `render::sort::screen_y`                                 |
+| `exey.engine.render.sorting.IsometricRectangleSorter` | `render::sort::IsometricRectangleSorter` (M5 ✓) ★ |
+| `exey.engine.common.graph.Graph` / `GraphTopologicalSorter` | `render::sort::graph` (Kahn's algorithm) |
 | `exey.engine.render.camera.AbstractCamera2D`  | `render::camera::AbstractCamera2D`                       |
 | `exey.engine.render.camera.ICamera2D`         | `render::camera::ICamera2D`                              |
 | `exey.engine.render.camera.SimpleCamera2D`    | `render::camera::SimpleCamera2D`                         |

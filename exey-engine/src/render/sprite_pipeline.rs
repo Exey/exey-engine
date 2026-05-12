@@ -16,19 +16,20 @@
 //! ```text
 //!   offset  size  field
 //!   ------  ----  -----
-//!     0      8    vec2 view_scale   // camera world→clip x/y scale
-//!     8      8    vec2 view_offset  // camera world→clip x/y offset
-//!    16      8    vec2 world_pos    // per-sprite top-left in world pixels
-//!    24      8    vec2 world_size   // per-sprite size in world pixels
-//!    32     16    vec4 tint         // per-draw color modulator (default [1;4])
+//!     0      8    vec2 view_scale    // camera world→clip x/y scale
+//!     8      8    vec2 view_offset   // camera world→clip x/y offset
+//!    16      8    vec2 world_pos     // per-sprite top-left in world pixels
+//!    24      8    vec2 world_size    // per-sprite size in world pixels
+//!    32     16    vec4 tint          // per-draw color modulator
+//!    48      8    vec2 uv_offset     // atlas sub-region offset in [0..1]
+//!    56      8    vec2 uv_scale      // atlas sub-region scale  in [0..1]
 //! ```
 //!
-//! Total: 48 bytes — well under the 128-byte Vulkan minimum guarantee.
-//! In M4 the per-frame fields were renamed `screen_*` → `view_*` to
-//! reflect that they now encode the camera's full world→clip transform
-//! (pan + zoom + ortho), not just a fixed pixel→clip mapping. The byte
-//! layout is unchanged — same `vec2 vec2 vec2 vec2 vec4` totalling 48
-//! bytes — so this is a semantic rename only.
+//! Total: 64 bytes — well under the 128-byte Vulkan minimum guarantee.
+//! M5 widened from 48 → 64 to add `uv_offset` / `uv_scale` so atlas-based
+//! sprites (e.g. bitmap-font glyphs, M9 sprite atlases) share the same
+//! pipeline as tiles. Tiles set `uv_offset=(0,0)` `uv_scale=(1,1)` for
+//! the full texture.
 //!
 //! Dynamic state covers viewport and scissor so we don't rebuild the pipeline
 //! on resize. Color attachment format must match the swapchain at pipeline
@@ -66,20 +67,25 @@ pub struct SpritePushConstants {
     pub world_size: [f32; 2],
     /// Per-draw color modulator, multiplied into the per-vertex color.
     pub tint: [f32; 4],
+    /// Texture atlas offset in [0..1]. Maps unit-quad UV (0,0) to
+    /// `(uv_offset.x, uv_offset.y)` in the texture. Tiles use (0,0).
+    pub uv_offset: [f32; 2],
+    /// Texture atlas scale in [0..1]. Tiles use (1,1) for the full
+    /// texture; atlas glyphs use the glyph's fractional size.
+    pub uv_scale: [f32; 2],
 }
 
-// Layout note: GLSL push constants follow std430-ish rules where `vec2` is
-// 8-byte-aligned and `vec4` is 16-byte-aligned. Field order is four `vec2`s
-// (offsets 0, 8, 16, 24) followed by one `vec4` at offset 32 — std430
-// places `vec4` on a 16-byte boundary and 32 is divisible by 16, so the
-// natural `repr(C)` layout matches GLSL exactly. If you reorder, recheck:
-// e.g. `vec3` followed by `f32` packs differently in std430 than in repr(C).
+// Layout note: GLSL push constants follow std430-ish rules where `vec2`
+// is 8-byte-aligned and `vec4` is 16-byte-aligned. Field order is
+// vec2 vec2 vec2 vec2 vec4 vec2 vec2 — offsets 0, 8, 16, 24, 32, 48,
+// 56. The vec4 lands on a 16-byte boundary (32) as required. The
+// trailing vec2 pair packs naturally. Total: 64 bytes — under the
+// 128-byte minimum guarantee.
 
 impl SpritePushConstants {
     /// Build a push constant pre-filled with the camera's view transform.
     /// The per-sprite fields are left at defaults; the renderer
-    /// overwrites them per draw via [`Self::with_sprite`] or by direct
-    /// field assignment.
+    /// overwrites them per draw via [`Self::for_sprite`].
     pub fn for_view(view: crate::render::camera::ViewTransform) -> Self {
         Self {
             view_scale: view.view_scale,
@@ -87,24 +93,25 @@ impl SpritePushConstants {
             world_pos: [0.0, 0.0],
             world_size: [0.0, 0.0],
             tint: [1.0, 1.0, 1.0, 1.0],
+            uv_offset: [0.0, 0.0],
+            uv_scale: [1.0, 1.0],
         }
     }
 
-    /// Convenience: build a push constant with both the per-frame view
-    /// transform and the per-sprite fields filled in. Used by the renderer
-    /// right before each draw.
+    /// Build a push constant with both per-frame view transform and
+    /// per-sprite fields filled in. Used by the renderer per draw.
     pub fn for_sprite(
         view: crate::render::camera::ViewTransform,
-        world_pos: [f32; 2],
-        world_size: [f32; 2],
-        tint: [f32; 4],
+        sprite: &crate::render::Sprite,
     ) -> Self {
         Self {
             view_scale: view.view_scale,
             view_offset: view.view_offset,
-            world_pos,
-            world_size,
-            tint,
+            world_pos: sprite.pos,
+            world_size: sprite.size,
+            tint: sprite.tint,
+            uv_offset: sprite.uv_offset,
+            uv_scale: sprite.uv_scale,
         }
     }
 }

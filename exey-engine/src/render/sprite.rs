@@ -147,21 +147,70 @@ impl SpriteMesh {
 
 /// CPU-side sprite state. Mutate freely between frames; the renderer reads
 /// these fields each frame and pushes them through a per-draw push constant.
+///
+/// Iso fields (`iso_grid`, `iso_grid_size`) describe the sprite's logical
+/// position and footprint in grid space. They feed both:
+/// * The world-pixel `pos` (via `iso::logic_to_world`), set by callers.
+/// * The depth sorter ([`crate::render::sort::IsometricRectangleSorter`]),
+///   which orders sprites by their iso footprint occlusion.
+///
+/// `mesh_idx` selects which [`SpriteMesh`] in the demo's mesh array binds
+/// this sprite. The renderer rebinds the mesh when the index changes, so
+/// grouping sprites by mesh in the input slice minimises rebinds.
+///
+/// `uv_offset` and `uv_scale` carve a sub-region of the bound texture for
+/// this sprite. Tiles set offset=(0,0) scale=(1,1) for the full texture;
+/// atlas glyphs set them to point at the glyph's strip.
 #[derive(Copy, Clone, Debug)]
 pub struct Sprite {
-    /// Top-left in pixels (framebuffer coords, +Y down).
+    /// Top-left in world pixels (+Y down).
     pub pos: [f32; 2],
-    /// Width and height in pixels.
+    /// Width and height in world pixels.
     pub size: [f32; 2],
-    /// Velocity in pixels per second. Used by the demo's bounce update;
-    /// the renderer ignores this.
+    /// Velocity in pixels per second (engine ignores; demos may use).
     pub velocity: [f32; 2],
     /// Per-sprite color modulator. Multiplies the sampled texel.
     pub tint: [f32; 4],
+    /// Logical grid position (front corner) in iso logic space. Feeds
+    /// `iso::logic_to_world` (for `pos`) and the iso depth sorter.
+    /// Zero for non-iso sprites (e.g. GUI overlays).
+    pub iso_grid: [f32; 2],
+    /// Logical footprint size in iso grid space. 1.0 for a single tile,
+    /// 2.0 for a 2×2 building, etc. Zero for non-iso sprites — the
+    /// sorter ignores zero-footprint bounds via the layer split.
+    pub iso_grid_size: [f32; 2],
+    /// Texture atlas offset, in [0..1]. Tiles use (0, 0).
+    pub uv_offset: [f32; 2],
+    /// Texture atlas scale, in [0..1]. Tiles use (1, 1).
+    pub uv_scale: [f32; 2],
+    /// Which `SpriteMesh` (in the demo's mesh array) this sprite uses.
+    /// Renderer rebinds mesh when this changes.
+    pub mesh_idx: u8,
 }
 
 impl Sprite {
+    /// Constructor preserving the M3 API. Defaults iso fields to zero
+    /// (non-iso), uv to full, mesh_idx to 0.
     pub fn new(pos: [f32; 2], size: [f32; 2], velocity: [f32; 2], tint: [f32; 4]) -> Self {
-        Self { pos, size, velocity, tint }
+        Self {
+            pos,
+            size,
+            velocity,
+            tint,
+            iso_grid: [0.0, 0.0],
+            iso_grid_size: [0.0, 0.0],
+            uv_offset: [0.0, 0.0],
+            uv_scale: [1.0, 1.0],
+            mesh_idx: 0,
+        }
+    }
+}
+
+impl crate::render::sort::IsoSortable for Sprite {
+    fn iso_bounds(&self) -> crate::render::sort::IsoBounds {
+        crate::render::sort::IsoBounds::from_grid(
+            glam::Vec2::from(self.iso_grid),
+            glam::Vec2::from(self.iso_grid_size),
+        )
     }
 }

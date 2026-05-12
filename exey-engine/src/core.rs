@@ -70,19 +70,19 @@ impl Engine {
 
     /// Draw one frame.
     ///
-    /// * `mesh`    — shared unit-quad geometry + texture descriptor (M3
-    ///   demos own one of these and pass it in; M5+ may pass several).
-    /// * `camera`  — the camera whose view transform applies to this frame.
-    ///   The engine reads its position/zoom/viewport and computes the
-    ///   `(view_scale, view_offset)` push-constant fields from them.
-    /// * `sprites` — CPU-side state for sprites to draw this frame. Empty
-    ///   slice = clear-only frame.
+    /// * `camera`        — the view to render through.
+    /// * `meshes`        — slice of meshes; sprites' `mesh_idx` indexes into this.
+    /// * `world_sprites` — iso-positioned sprites; sorted by the iso sorter.
+    /// * `gui_sprites`   — overlay sprites; rendered after world in input order.
+    ///
+    /// Empty slices are fine; an empty world+gui draws a clear-only frame.
     pub fn draw_frame(
         &mut self,
         window: &Window,
         camera: &dyn crate::render::ICamera2D,
-        mesh: &crate::render::SpriteMesh,
-        sprites: &[Sprite],
+        meshes: &[&crate::render::SpriteMesh],
+        world_sprites: &[Sprite],
+        gui_sprites: &[Sprite],
     ) -> Result<()> {
         // Log only the first few frames in detail so we can confirm wiring
         // end-to-end without spamming the console at ~vsync rate. After
@@ -131,21 +131,36 @@ impl Engine {
         let device = &self.device;
         let pipeline = &self.render.sprite_pipeline;
         let clear = self.render.clear_color;
-        let renderer = &mut self.render.renderer;
-        // Read the camera's view transform once per frame. The renderer
-        // copies it into every push constant. We could cache this on the
-        // engine when the camera changes, but at 1024 sprites × ~20 ns
-        // per copy it's cheaper than the bookkeeping.
         let view = camera.view_transform();
+
+        // Compute iso bounds for the world sprites and run the sorter.
+        // For an empty world we skip the sort entirely. Bounds buffer is
+        // reused across frames.
+        let world_sort_order: Vec<u32> = if world_sprites.is_empty() {
+            Vec::new()
+        } else {
+            let bounds = &mut self.render.sort_bounds_scratch;
+            bounds.clear();
+            bounds.reserve(world_sprites.len());
+            for s in world_sprites {
+                use crate::render::sort::IsoSortable;
+                bounds.push(s.iso_bounds());
+            }
+            self.render.sorter.sort(bounds)
+        };
+
+        let renderer = &mut self.render.renderer;
 
         if verbose {
             log::info!(
-                "frame {}: extent={}x{}  image_index={}  sprites={}  renderer={:?}",
+                "frame {}: extent={}x{}  image_index={}  world={} gui={} meshes={} renderer={:?}",
                 self.frame_index,
                 extent.width,
                 extent.height,
                 image_index,
-                sprites.len(),
+                world_sprites.len(),
+                gui_sprites.len(),
+                meshes.len(),
                 renderer.kind(),
             );
             log::info!(
@@ -157,10 +172,12 @@ impl Engine {
 
         let ctx = crate::render::RenderContext {
             pipeline,
-            mesh,
+            meshes,
             extent,
             view,
-            sprites,
+            world_sprites,
+            world_sort_order: &world_sort_order,
+            gui_sprites,
             clear_color: clear,
             verbose,
         };
