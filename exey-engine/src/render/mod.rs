@@ -163,7 +163,7 @@ impl IRenderer for SimpleRenderer {
         let pipeline = ctx.pipeline;
         let meshes = ctx.meshes;
         let view = ctx.view;
-        let mut draw_one = |sprite: &Sprite, current: &mut Option<u8>| {
+        let draw_one = |sprite: &Sprite, current: &mut Option<u8>| {
             // Clamp mesh_idx defensively — out-of-range falls back to 0,
             // logged once per offending sprite (verbose only).
             let mesh_idx = if (sprite.mesh_idx as usize) < meshes.len() {

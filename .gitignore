@@ -6,3 +6,4 @@ Cargo.lock
 isometric-world-generator/assets/*
 !isometric-world-generator/assets/README.md
 !isometric-world-generator/assets/.gitkeep
+.claude

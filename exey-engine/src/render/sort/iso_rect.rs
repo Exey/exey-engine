@@ -127,9 +127,9 @@ fn depth_compare(a: &IsoBounds, b: &IsoBounds) -> i32 {
         1
     } else if a_term < b_term {
         -1
-    } else if a.index < b.index {
-        1
     } else if a.index > b.index {
+        1
+    } else if a.index < b.index {
         -1
     } else {
         0

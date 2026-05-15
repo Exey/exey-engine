@@ -28,7 +28,7 @@ use std::time::{Duration, Instant};
 use anyhow::Result;
 use exey_engine::glam::Vec2;
 use exey_engine::{
-    Engine, EngineConfig, FrameClock, ICamera2D, IsometricCamera2D, RendererKind, Sprite,
+    Engine, EngineConfig, FrameClock, IsometricCamera2D, RendererKind, Sprite,
     SpriteMesh, Texture, iso,
 };
 use winit::application::ApplicationHandler;
@@ -39,7 +39,6 @@ use winit::keyboard::{Key, NamedKey};
 use winit::window::{Window, WindowAttributes, WindowId};
 
 mod font;
-use font::FontAtlas;
 
 const WINDOW_W: u32 = 1280;
 const WINDOW_H: u32 = 720;
@@ -331,11 +330,6 @@ struct Scene {
     font_mesh: SpriteMesh,
     font_texture: Texture,
 
-    /// Vertical pixel height the building sprite extends above its base.
-    /// Stored so we can compute the building's sprite quad size and the
-    /// vertical offset to place its base diamond at the right tile.
-    building_body_extra: f32,
-
     /// World sprites: tiles + buildings, sorted by the iso sorter each frame.
     world_sprites: Vec<Sprite>,
     /// GUI sprites: FPS overlay text, drawn after world.
@@ -453,7 +447,7 @@ impl Scene {
                 let front_gx = gx + 1;
                 let front_gy = gy + 1;
                 let g = Vec2::new(front_gx as f32, front_gy as f32);
-                let world_front = iso::logic_to_world(g, TILE_H);
+                let _world_front = iso::logic_to_world(g, TILE_H);
                 // World position of the building's sprite top-left:
                 //   x: front_world.x - building_sprite_w/2   (centre under front corner... no)
                 // Actually we want the building's *base* diamond to land
@@ -515,7 +509,6 @@ impl Scene {
             building_texture,
             font_mesh,
             font_texture,
-            building_body_extra: body_extra as f32,
             world_sprites,
             gui_sprites: Vec::new(),
             camera,
