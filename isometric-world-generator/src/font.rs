@@ -21,7 +21,7 @@
 pub const GLYPH_W: u32 = 5;
 pub const GLYPH_H: u32 = 7;
 /// Number of glyph slots in the atlas.
-pub const GLYPHS: u32 = 16;
+pub const GLYPHS: u32 = 17;
 /// Atlas dimensions.
 pub const ATLAS_W: u32 = GLYPH_W * GLYPHS;
 pub const ATLAS_H: u32 = GLYPH_H;
@@ -46,6 +46,7 @@ pub fn glyph_index(c: char) -> Option<u32> {
         'F' | 'f' => Some(13),
         'P' | 'p' => Some(14),
         'S' | 's' => Some(15),
+        ','       => Some(16),
         _ => None,
     }
 }
@@ -54,7 +55,7 @@ pub fn glyph_index(c: char) -> Option<u32> {
 /// row, with bit 4 = leftmost pixel of a 5-wide glyph.
 /// Layout: [glyph_idx][row].
 #[rustfmt::skip]
-const GLYPH_BITS: [[u8; 7]; 16] = [
+const GLYPH_BITS: [[u8; 7]; 17] = [
     // 0
     [0b01110, 0b10001, 0b10011, 0b10101, 0b11001, 0b10001, 0b01110],
     // 1
@@ -87,6 +88,8 @@ const GLYPH_BITS: [[u8; 7]; 16] = [
     [0b11110, 0b10001, 0b10001, 0b11110, 0b10000, 0b10000, 0b10000],
     // S
     [0b01111, 0b10000, 0b10000, 0b01110, 0b00001, 0b00001, 0b11110],
+    // , (comma)
+    [0b00000, 0b00000, 0b00000, 0b00000, 0b00100, 0b00100, 0b01000],
 ];
 
 /// Build the RGBA atlas: white opaque on font pixels, fully transparent

@@ -28,8 +28,8 @@ use std::time::{Duration, Instant};
 use anyhow::Result;
 use exey_engine::glam::Vec2;
 use exey_engine::{
-    Engine, EngineConfig, FrameClock, IsometricCamera2D, RendererKind, Sprite,
-    SpriteMesh, Texture, iso,
+    depth_compare, Engine, EngineConfig, FrameClock, IsometricCamera2D, IsoSortable,
+    IsoBounds, RendererKind, Sprite, SpriteMesh, Texture, iso,
 };
 use winit::application::ApplicationHandler;
 use winit::dpi::PhysicalPosition;
@@ -57,10 +57,9 @@ const GRID_H: usize = 32;
 /// expressed as a multiplicative factor on the computed zoom.
 const ZOOM_FIT_MARGIN: f32 = 0.95;
 
-/// Number of 2×2 buildings to scatter. Pseudo-random placement, but
-/// deterministic per-run (LCG seed). Each building has a 2×2 iso
-/// footprint so the sorter has interesting occlusion to resolve.
-const BUILDING_COUNT: usize = 24;
+/// Debug: place exactly 2 buildings at fixed positions.
+/// Building 0: back corner at (0,0); Building 1: center of grid.
+const BUILDING_COUNT: usize = 2;
 
 /// Zoom multiplier per +/- keypress.
 const ZOOM_STEP: f32 = 1.10;
@@ -151,6 +150,89 @@ impl log::Log for StdoutLogger {
     }
 }
 static LOGGER: StdoutLogger = StdoutLogger;
+
+/// Dump sort-order debug info for buildings and their neighbours.
+/// Called once per session on the first rendered frame.
+fn log_sort_debug(sort_order: &[u32], world_sprites: &[Sprite]) {
+    log::info!("=== SORT DEBUG  ({} sprites, {} in order) ===", world_sprites.len(), sort_order.len());
+
+    // Build a rank lookup: rank_of[sprite_idx] = rank in sort_order.
+    let mut rank_of = vec![0usize; world_sprites.len()];
+    for (rank, &idx) in sort_order.iter().enumerate() {
+        rank_of[idx as usize] = rank;
+    }
+
+    for (rank, &idx) in sort_order.iter().enumerate() {
+        let s = &world_sprites[idx as usize];
+        if s.mesh_idx != MESH_BUILDING { continue; }
+
+        let b = s.iso_bounds();
+        log::info!(
+            "BUILDING [input_idx={}] rank={} grid=[{},{}] size=[{},{}]",
+            idx, rank, s.iso_grid[0], s.iso_grid[1], s.iso_grid_size[0], s.iso_grid_size[1],
+        );
+        log::info!(
+            "  iso: x1={:.1} y1={:.1} x2={:.1} y2={:.1}  left={:.1} right={:.1}",
+            b.iso_x1, b.iso_y1, b.iso_x2, b.iso_y2, b.iso_left(), b.iso_right(),
+        );
+
+        // Show ±10 neighbours in draw order.
+        let lo = rank.saturating_sub(10);
+        let hi = (rank + 11).min(sort_order.len());
+        log::info!("  -- neighbours in draw order (rank {} to {}) --", lo, hi - 1);
+        for r in lo..hi {
+            let ni = sort_order[r] as usize;
+            let ns = &world_sprites[ni];
+            let nb = ns.iso_bounds();
+            let a_term = (b.iso_x1 - nb.iso_x2).max(b.iso_y1 - nb.iso_y2);
+            let b_term = (nb.iso_x1 - b.iso_x2).max(nb.iso_y1 - b.iso_y2);
+            let cmp = depth_compare(&b, &nb);
+            let marker = if r == rank { ">>>" } else { "   " };
+            log::info!(
+                "  {} rank={:4} idx={:4} mesh={} grid=[{:.0},{:.0}] \
+                 iso_left={:.1} iso_right={:.1}  \
+                 depth_cmp(bldg,this)={:+} (a={:.1} b={:.1})",
+                marker, r, ni, ns.mesh_idx,
+                ns.iso_grid[0], ns.iso_grid[1],
+                nb.iso_left(), nb.iso_right(),
+                cmp, a_term, b_term,
+            );
+        }
+
+        // Explicitly check the 4 footprint tiles and 4 side-adjacent tiles.
+        let gx = (b.iso_x1) as isize;
+        let gy = (b.iso_y1) as isize;
+        log::info!("  -- footprint + side tiles depth_compare(building, tile) --");
+        let check_coords: &[(isize, isize, &str)] = &[
+            (gx,   gy,   "back corner"),
+            (gx+1, gy,   "footprint front-x"),
+            (gx,   gy+1, "footprint front-y"),
+            (gx+1, gy+1, "footprint front"),
+            (gx-1, gy,   "side left-x"),
+            (gx,   gy-1, "side left-y"),
+            (gx+2, gy,   "side right-x"),
+            (gx,   gy+2, "side right-y"),
+            (gx+2, gy+2, "diagonal front"),
+        ];
+        for &(tx, ty, label) in check_coords {
+            if tx < 0 || ty < 0 || tx >= GRID_W as isize || ty >= GRID_H as isize { continue; }
+            let ti = (ty as usize) * GRID_W + tx as usize;
+            let ts = &world_sprites[ti];
+            let tb: IsoBounds = ts.iso_bounds();
+            let cmp = depth_compare(&b, &tb);
+            let a_term = (b.iso_x1 - tb.iso_x2).max(b.iso_y1 - tb.iso_y2);
+            let b_term = (tb.iso_x1 - b.iso_x2).max(tb.iso_y1 - b.iso_y2);
+            let expected = if label.starts_with("footprint") { ">0 (bldg in front)" }
+                           else if label.starts_with("side") || label == "diagonal front"
+                               { "<0 (tile in front)" } else { "?" };
+            log::info!(
+                "    tile({:2},{:2}) [rank={:4}] {:16}  cmp={:+}  a={:+.1} b={:+.1}  want: {}",
+                tx, ty, rank_of[ti], label, cmp, a_term, b_term, expected,
+            );
+        }
+    }
+    log::info!("=== END SORT DEBUG ===");
+}
 
 fn main() -> Result<()> {
     // Stdout-flushed banner: this is the very first thing main() does. If
@@ -308,19 +390,6 @@ fn build_building_rgba(tile_w: u32, tile_h: u32, body_extra: u32) -> (u32, u32, 
     (base_w, height, rgba)
 }
 
-/// Tiny LCG for deterministic building placement.
-struct Lcg(u32);
-impl Lcg {
-    fn new(seed: u32) -> Self { Self(if seed == 0 { 1 } else { seed }) }
-    fn next_u32(&mut self) -> u32 {
-        self.0 = self.0.wrapping_mul(1_664_525).wrapping_add(1_013_904_223);
-        self.0
-    }
-    fn next_range(&mut self, lo: usize, hi: usize) -> usize {
-        lo + (self.next_u32() as usize) % (hi - lo)
-    }
-}
-
 struct Scene {
     // GPU resources (kept alive for the scene's lifetime).
     tile_mesh: SpriteMesh,
@@ -343,9 +412,14 @@ struct Scene {
     /// Last known cursor position (for screen-space hit math when zooming).
     cursor: PhysicalPosition<f64>,
 
+    /// Static tile coordinate label sprites (built once, appended to gui each
+    /// frame). Stored separately so rebuild_fps_overlay doesn't recompute them.
+    label_sprites: Vec<Sprite>,
     /// Last-known FPS string content; we rebuild gui_sprites only when it
     /// changes (each second) to avoid per-frame allocation.
     last_fps_text: String,
+    /// Set to true after the first-frame sort debug log fires.
+    sort_logged: bool,
 }
 
 impl Scene {
@@ -419,72 +493,63 @@ impl Scene {
         }
         log::info!("Scene::new — placed {} tile sprites", world_sprites.len());
 
-        // Buildings on deterministic-random 2x2 anchors. We track placed
-        // cells to avoid stacking.
-        let mut lcg = Lcg::new(0xBEEF);
-        let mut placed_cells: Vec<(usize, usize)> = Vec::new();
+        // Two fixed debug buildings. Back corner (gx,gy) → sprite anchored at
+        // world(gx,gy) (the top corner of the back tile). iso_grid is set to
+        // [gx+2, gy+2] so the building's sort front corner is one step past
+        // the footprint's frontmost tile.
         let building_sprite_w = TILE_W * 2.0;
         let building_sprite_h = TILE_H * 2.0 + body_extra as f32;
-        for _ in 0..BUILDING_COUNT {
-            // Try a few times to find a clear 2x2 spot. If we exhaust
-            // attempts, drop this building — the sorter doesn't care.
-            let mut placed = false;
-            for _try in 0..32 {
-                let gx = lcg.next_range(1, GRID_W - 2);
-                let gy = lcg.next_range(1, GRID_H - 2);
-                // Skip if any placed building's anchor is within 2 cells
-                // (rough collision avoidance — accepts adjacency but not
-                // overlap of the 2x2 footprints).
-                let too_close = placed_cells.iter().any(|&(px, py)| {
-                    (gx as isize - px as isize).abs() < 2
-                        && (gy as isize - py as isize).abs() < 2
-                });
-                if too_close { continue; }
-                placed_cells.push((gx, gy));
-                // The building's iso anchor (front corner) is at
-                // (gx+1, gy+1) — the front corner of a 2x2 footprint
-                // anchored with its back corner at (gx, gy).
-                let front_gx = gx + 1;
-                let front_gy = gy + 1;
-                let g = Vec2::new(front_gx as f32, front_gy as f32);
-                let _world_front = iso::logic_to_world(g, TILE_H);
-                // World position of the building's sprite top-left:
-                //   x: front_world.x - building_sprite_w/2   (centre under front corner... no)
-                // Actually we want the building's *base* diamond to land
-                // on tiles [gx..gx+1, gy..gy+1]. The base diamond spans
-                // world-x [world(gx, gy+1).x .. world(gx+1, gy).x], which
-                // is [-tile_h..+tile_h] = [-tile_w/2..+tile_w/2] relative
-                // to world(gx, gy). The diamond's top corner sits at
-                // world(gx, gy) - (tile_w/2, 0) — no, world(gx,gy) is the
-                // top corner of cell (gx, gy)'s diamond.
-                //
-                // Simpler: the building's base diamond's top corner
-                // (highest y) is at world((gx, gy)). The building sprite
-                // extends from that point: y starts at world(gx,gy).y -
-                // body_extra (the top of the body) and width is 2*tile_w
-                // centred on world(gx,gy).x.
-                let anchor = iso::logic_to_world(Vec2::new(gx as f32, gy as f32), TILE_H);
-                let pos = [
-                    anchor.x - building_sprite_w * 0.5,
-                    anchor.y - body_extra as f32,
-                ];
-                let tint = [1.0, 1.0, 1.0, 1.0];
-                let mut s = Sprite::new(pos, [building_sprite_w, building_sprite_h], [0.0, 0.0], tint);
-                // Sort using the *front* iso corner of the 2x2 footprint
-                // and size 2x2 so iso_x1/y1 = front-2 = back corner.
-                s.iso_grid = [front_gx as f32, front_gy as f32];
-                s.iso_grid_size = [2.0, 2.0];
-                s.mesh_idx = MESH_BUILDING;
-                world_sprites.push(s);
-                placed = true;
-                break;
-            }
-            let _ = placed;
+        let debug_backs: [(usize, usize); BUILDING_COUNT] = [
+            (0, 0),                             // Building 0: top-left corner
+            (GRID_W / 2 - 1, GRID_H / 2 - 1), // Building 1: center
+        ];
+        for (i, (gx, gy)) in debug_backs.iter().enumerate() {
+            let (gx, gy) = (*gx, *gy);
+            let anchor = iso::logic_to_world(Vec2::new(gx as f32, gy as f32), TILE_H);
+            let pos = [anchor.x - building_sprite_w * 0.5, anchor.y - body_extra as f32];
+            let tint = [1.0, 1.0, 1.0, 1.0];
+            let mut s = Sprite::new(pos, [building_sprite_w, building_sprite_h], [0.0, 0.0], tint);
+            s.iso_grid = [(gx + 2) as f32, (gy + 2) as f32];
+            s.iso_grid_size = [2.0, 2.0];
+            s.mesh_idx = MESH_BUILDING;
+            world_sprites.push(s);
+            log::info!(
+                "Scene::new — building {} back=({},{}) iso_grid=[{},{}] anchor=({:.1},{:.1})",
+                i, gx, gy, gx + 2, gy + 2, anchor.x, anchor.y,
+            );
         }
-        log::info!(
-            "Scene::new — placed {} buildings (target {BUILDING_COUNT})",
-            placed_cells.len(),
-        );
+        log::info!("Scene::new — placed {BUILDING_COUNT} debug buildings");
+
+        // -- Tile coordinate labels (static, built once) --
+        // Each tile gets a "gx,gy" text label rendered as a GUI sprite on top.
+        // Scale: small enough to fit in a tile but readable when zoomed in.
+        let label_scale = 1.5f32;
+        let label_gw = font::GLYPH_W as f32 * label_scale;
+        let label_advance = label_gw + label_scale;
+        let mut label_sprites = Vec::with_capacity(GRID_W * GRID_H * 5);
+        for gy in 0..GRID_H {
+            for gx in 0..GRID_W {
+                let world = iso::logic_to_world(Vec2::new(gx as f32, gy as f32), TILE_H);
+                let text = format!("{},{}", gx, gy);
+                let char_count = text.chars()
+                    .filter(|c| font::glyph_index(*c).is_some())
+                    .count() as f32;
+                let label_w = char_count * label_advance;
+                // Center the label horizontally over the tile's top corner,
+                // shifted down just a few pixels so it sits inside the diamond.
+                let lx = world.x - label_w * 0.5;
+                let ly = world.y + 4.0;
+                font::FontAtlas::emit(
+                    &mut label_sprites,
+                    &text,
+                    lx, ly,
+                    label_scale,
+                    [1.0, 1.0, 0.0, 0.85],
+                    MESH_FONT,
+                );
+            }
+        }
+        log::info!("Scene::new — built {} tile label sprites", label_sprites.len());
 
         // -- Camera --
         let world_w = TILE_H * 2.0 * (GRID_W.max(GRID_H) as f32 - 1.0) + TILE_W;
@@ -511,10 +576,12 @@ impl Scene {
             font_texture,
             world_sprites,
             gui_sprites: Vec::new(),
+            label_sprites,
             camera,
             drag_anchor: None,
             cursor: PhysicalPosition::new(0.0, 0.0),
             last_fps_text: String::new(),
+            sort_logged: false,
         })
     }
 
@@ -578,6 +645,8 @@ impl Scene {
             [1.0, 1.0, 0.4, 1.0], // yellow
             MESH_FONT,
         );
+        // Append static tile labels after the FPS text.
+        self.gui_sprites.extend_from_slice(&self.label_sprites);
     }
 
     fn destroy(&mut self, engine: &Engine) {
@@ -752,8 +821,17 @@ impl ApplicationHandler for App {
                     scene.rebuild_fps_overlay(self.clock.fps());
                 }
                 if let (Some(engine), Some(scene)) =
-                    (self.engine.as_mut(), self.scene.as_ref())
+                    (self.engine.as_mut(), self.scene.as_mut())
                 {
+                    // First-frame sort debug: compute sort order and log it.
+                    if !scene.sort_logged {
+                        scene.sort_logged = true;
+                        let bounds: Vec<_> = scene.world_sprites.iter()
+                            .map(|s| s.iso_bounds()).collect();
+                        let order = engine.render.sorter.sort(&bounds);
+                        log_sort_debug(&order, &scene.world_sprites);
+                    }
+                    let scene = &*scene;
                     let meshes: [&SpriteMesh; 3] =
                         [&scene.tile_mesh, &scene.building_mesh, &scene.font_mesh];
                     if let Err(e) = engine.draw_frame(

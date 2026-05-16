@@ -24,7 +24,7 @@
 pub mod graph;
 pub mod iso_rect;
 
-pub use iso_rect::{IsoBounds, IsoSortable, IsometricRectangleSorter};
+pub use iso_rect::{depth_compare, IsoBounds, IsoSortable, IsometricRectangleSorter};
 
 /// Sort produces a permutation of the input indices: `result[i]` is the
 /// sprite that should be drawn at position `i` in the final order.

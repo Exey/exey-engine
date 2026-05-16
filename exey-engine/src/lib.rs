@@ -37,7 +37,7 @@ pub use crate::render::{
     ICamera2D, IsometricCamera2D, RendererKind, SimpleCamera2D, Sprite, SpriteMesh,
 };
 // Sorting (M5+).
-pub use crate::render::sort::{IsoBounds, IsoSortable, IsometricRectangleSorter};
+pub use crate::render::sort::{depth_compare, IsoBounds, IsoSortable, IsometricRectangleSorter};
 pub use crate::time::FrameClock;
 
 // Re-export the iso math as a module so the demo can call

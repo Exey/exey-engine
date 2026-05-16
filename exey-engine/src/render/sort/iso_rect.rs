@@ -119,7 +119,7 @@ pub trait IsoSortable {
 /// an `i32` so the index tiebreak is explicit. For unequal bounds, the
 /// sign of the result is what matters; ties (`a == b` value-wise)
 /// disambiguate by `index` so the sort is stable.
-fn depth_compare(a: &IsoBounds, b: &IsoBounds) -> i32 {
+pub fn depth_compare(a: &IsoBounds, b: &IsoBounds) -> i32 {
     // a-front-of-b along the dominant separating axis.
     let a_term = (a.iso_x1 - b.iso_x2).max(a.iso_y1 - b.iso_y2);
     let b_term = (b.iso_x1 - a.iso_x2).max(b.iso_y1 - a.iso_y2);
@@ -127,9 +127,9 @@ fn depth_compare(a: &IsoBounds, b: &IsoBounds) -> i32 {
         1
     } else if a_term < b_term {
         -1
-    } else if a.index > b.index {
-        1
     } else if a.index < b.index {
+        1
+    } else if a.index > b.index {
         -1
     } else {
         0
