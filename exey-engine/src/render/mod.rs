@@ -4,13 +4,18 @@
 //!   and the chosen [`IRenderer`] strategy. Per frame it sorts the world layer
 //!   (via [`sort::ISorter`]), builds a [`RenderContext`], and hands that to
 //!   the renderer.
-//! - [`IRenderer`] is the strategy trait. M2 wires up a functional
-//!   [`SimpleRenderer`]; the Batch and BigBuffer kinds delegate to it for
-//!   identical output until M5/M6 ship the real algorithms.
+//! - [`IRenderer`] is the strategy trait with three concrete impls:
+//!   [`SimpleRenderer`] (one draw per sprite, the M2/M3 baseline),
+//!   [`BatchRenderer`] (M2 stub — still delegates to Simple; M5/M6 stays
+//!   stubbed because BigBuffer subsumes it for the demo workload), and
+//!   [`BigBufferRenderer`] (M6 — 65k-cap streaming with state-change
+//!   batching, the algorithm the README documents at length).
 //!
 //! The `Kind` enum exists so the demo can pick a renderer at startup via a CLI
 //! flag (`--renderer simple|batch|bigbuffer`).
 
+pub mod big_buffer;
+pub mod buffer_pair;
 pub mod camera;
 pub mod iso;
 pub mod sort;
@@ -20,8 +25,9 @@ pub mod sprite_pipeline;
 use anyhow::Result;
 use vulkanalia::prelude::v1_0::*;
 
-use crate::gfx::{Device, Swapchain};
+use crate::gfx::{Device, Instance, Swapchain};
 
+pub use big_buffer::BigBufferRenderer;
 pub use camera::{ICamera2D, IsometricCamera2D, SimpleCamera2D, ViewTransform};
 pub use sprite::{Sprite, SpriteMesh};
 pub use sprite_pipeline::{SpritePipeline, SpritePushConstants};
@@ -74,8 +80,8 @@ impl RendererKind {
 ///   (overlay text, HUD, debug). Not sorted by the iso sorter.
 /// * `clear_color`, `verbose` — orchestration / diagnostics
 ///
-/// M6 will let the BigBuffer renderer access the streaming vertex pool
-/// through here.
+/// `BigBufferRenderer` (M6) consumes the same context — its streaming
+/// buffer pool is owned by the renderer itself rather than living here.
 pub struct RenderContext<'a> {
     pub pipeline: &'a SpritePipeline,
     pub meshes: &'a [&'a SpriteMesh],
@@ -229,7 +235,7 @@ impl IRenderer for SimpleRenderer {
     fn destroy(&mut self, _device: &Device) {}
 }
 
-/// M2 stub. Until M3+'s state-change-batching arrives, this is identical
+/// M2 stub. Until M5's state-change-batching arrives, this is identical
 /// to [`SimpleRenderer`] — same draw calls, same output. The CLI flag is
 /// preserved so we can validate the wiring end-to-end before the real
 /// algorithm lands.
@@ -267,47 +273,38 @@ impl IRenderer for BatchRenderer {
     }
 }
 
-/// M2 stub. Same shape as [`BatchRenderer`] — placeholder until M6 builds
-/// the 65k-cap streaming buffer pool and the state-change loop.
-pub struct BigBufferRenderer {
-    inner: SimpleRenderer,
-}
-
-impl BigBufferRenderer {
-    pub fn new() -> Self {
-        Self {
-            inner: SimpleRenderer::new(),
-        }
-    }
-}
-
-impl Default for BigBufferRenderer {
-    fn default() -> Self {
-        Self::new()
-    }
-}
-
-impl IRenderer for BigBufferRenderer {
-    fn kind(&self) -> RendererKind {
-        RendererKind::BigBuffer
-    }
-    fn init(&mut self, device: &Device) -> Result<()> {
-        log::info!("renderer init: bigbuffer (M2 stub — delegates to simple)");
-        self.inner.init(device)
-    }
-    fn record(&mut self, device: &Device, cb: vk::CommandBuffer, ctx: &RenderContext) {
-        self.inner.record(device, cb, ctx);
-    }
-    fn destroy(&mut self, device: &Device) {
-        self.inner.destroy(device);
-    }
-}
-
-fn make_renderer(kind: RendererKind) -> Box<dyn IRenderer> {
+/// Build the concrete renderer for `kind`, calling its `init` and any
+/// type-specific setup that needs `&Instance` (notably:
+/// [`BigBufferRenderer::allocate_pools`] needs to allocate streaming
+/// buffers).
+///
+/// We do this here rather than inside `IRenderer::init` because widening
+/// the trait method to take `&Instance` would force every implementation
+/// — including the stubs — to thread the instance through, just so one
+/// concrete renderer can allocate device buffers. Doing it once at
+/// construction keeps the trait minimal.
+fn make_renderer(
+    kind: RendererKind,
+    instance: &Instance,
+    device: &Device,
+) -> Result<Box<dyn IRenderer>> {
     match kind {
-        RendererKind::Simple => Box::new(SimpleRenderer::new()),
-        RendererKind::Batch => Box::new(BatchRenderer::new()),
-        RendererKind::BigBuffer => Box::new(BigBufferRenderer::new()),
+        RendererKind::Simple => {
+            let mut r = SimpleRenderer::new();
+            r.init(device)?;
+            Ok(Box::new(r))
+        }
+        RendererKind::Batch => {
+            let mut r = BatchRenderer::new();
+            r.init(device)?;
+            Ok(Box::new(r))
+        }
+        RendererKind::BigBuffer => {
+            let mut r = BigBufferRenderer::new();
+            r.init(device)?;
+            r.allocate_pools(instance, device)?;
+            Ok(Box::new(r))
+        }
     }
 }
 
@@ -324,9 +321,13 @@ pub struct RenderCore {
 }
 
 impl RenderCore {
-    pub fn new(kind: RendererKind, device: &Device, swapchain: &Swapchain) -> Result<Self> {
-        let mut renderer = make_renderer(kind);
-        renderer.init(device)?;
+    pub fn new(
+        kind: RendererKind,
+        instance: &Instance,
+        device: &Device,
+        swapchain: &Swapchain,
+    ) -> Result<Self> {
+        let renderer = make_renderer(kind, instance, device)?;
         let sprite_pipeline = SpritePipeline::new(device, swapchain)?;
         Ok(Self {
             renderer,

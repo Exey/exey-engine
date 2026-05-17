@@ -49,7 +49,7 @@ impl Engine {
         let size = window.inner_size();
         let swapchain = Swapchain::new(&instance, &device, (size.width, size.height))?;
         let frames = gfx::FramesInFlight::new(&device)?;
-        let render = RenderCore::new(config.renderer, &device, &swapchain)?;
+        let render = RenderCore::new(config.renderer, &instance, &device, &swapchain)?;
         Ok(Self {
             render,
             frames,
