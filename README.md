@@ -149,9 +149,11 @@ is fine. For everything else, use the topological sorter.
 
 This document covers M1 (window + clear color + FPS + renderer-selection CLI),
 M2 (one textured quad), M3 (bouncing flock of textured sprites), M4
-(`IsometricCamera2D` + iso grid), and M5 (`IsometricRectangleSorter` —
+(`IsometricCamera2D` + iso grid), M5 (`IsometricRectangleSorter` —
 graph-topological depth sort over iso bounds, with mouse pan + keyboard
-zoom + in-window bitmap-font FPS overlay). See [`PLAN.md`](PLAN.md) for
+zoom + in-window bitmap-font FPS overlay), and M7 (`Animation2D` —
+shared `FrameStrip` + per-sprite `AnimationState`; wolves with 2-frame
+idle, 4 facings, staggered time offsets). See [`PLAN.md`](PLAN.md) for
 the milestone roadmap.
 
 ## Credits

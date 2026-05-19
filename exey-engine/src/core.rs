@@ -70,19 +70,28 @@ impl Engine {
 
     /// Draw one frame.
     ///
+    /// * `dt`            — seconds since the last frame; drives the M7
+    ///                     animation tick. Pass `0.0` to advance no
+    ///                     animations (useful on the very first frame
+    ///                     when the clock hasn't been ticked yet).
     /// * `camera`        — the view to render through.
     /// * `meshes`        — slice of meshes; sprites' `mesh_idx` indexes into this.
     /// * `world_sprites` — iso-positioned sprites; sorted by the iso sorter.
+    ///                     Mutable because the M7 animation pass writes
+    ///                     `uv_offset` / `uv_scale` on sprites whose
+    ///                     `anim` is `Some`. Static sprites are not touched.
     /// * `gui_sprites`   — overlay sprites; rendered after world in input order.
+    ///                     Also mutable for the same reason (animated UI).
     ///
     /// Empty slices are fine; an empty world+gui draws a clear-only frame.
     pub fn draw_frame(
         &mut self,
         window: &Window,
+        dt: f32,
         camera: &dyn crate::render::ICamera2D,
         meshes: &[&crate::render::SpriteMesh],
-        world_sprites: &[Sprite],
-        gui_sprites: &[Sprite],
+        world_sprites: &mut [Sprite],
+        gui_sprites: &mut [Sprite],
     ) -> Result<()> {
         // Log only the first few frames in detail so we can confirm wiring
         // end-to-end without spamming the console at ~vsync rate. After
@@ -133,6 +142,28 @@ impl Engine {
         let clear = self.render.clear_color;
         let view = camera.view_transform();
 
+        // M7 — animation tick. Walk both sprite slices once and, for each
+        // sprite carrying an AnimationState, advance time and resolve the
+        // current frame's UV. Static sprites (anim == None) are not
+        // touched, so per-frame cost is O(animated), not O(total).
+        //
+        // We run the tick *before* iso bounds collection because the new
+        // UV doesn't change iso footprint (sort math reads iso_grid /
+        // iso_grid_size, which the tick doesn't touch). The order is
+        // chosen for readability, not correctness.
+        if !self.render.frame_strips.is_empty() {
+            let strips = &self.render.frame_strips;
+            let mut animated = 0u32;
+            tick_animations(world_sprites, strips, dt, &mut animated);
+            tick_animations(gui_sprites, strips, dt, &mut animated);
+            if verbose {
+                log::info!(
+                    "frame {}: M7 animation tick — dt={:.5}s strips={} animated={}",
+                    self.frame_index, dt, strips.len(), animated,
+                );
+            }
+        }
+
         // Compute iso bounds for the world sprites and run the sorter.
         // For an empty world we skip the sort entirely. Bounds buffer is
         // reused across frames.
@@ -142,7 +173,7 @@ impl Engine {
             let bounds = &mut self.render.sort_bounds_scratch;
             bounds.clear();
             bounds.reserve(world_sprites.len());
-            for s in world_sprites {
+            for s in world_sprites.iter() {
                 use crate::render::sort::IsoSortable;
                 bounds.push(s.iso_bounds());
             }
@@ -170,14 +201,17 @@ impl Engine {
             );
         }
 
+        // Reborrow `&mut [Sprite]` → `&[Sprite]` for RenderContext. The
+        // engine has already done its mutating pass (the M7 animation
+        // tick above); from here on the renderer only reads.
         let ctx = crate::render::RenderContext {
             pipeline,
             meshes,
             extent,
             view,
-            world_sprites,
+            world_sprites: &*world_sprites,
             world_sort_order: &world_sort_order,
-            gui_sprites,
+            gui_sprites: &*gui_sprites,
             clear_color: clear,
             verbose,
         };
@@ -223,5 +257,54 @@ impl Drop for Engine {
         self.frames.destroy(&self.device);
         self.swapchain.destroy(&self.device);
         // Device / Instance drop themselves via their `Drop` impls.
+    }
+}
+
+/// Walk a sprite slice once, advancing `time` and writing UV for any
+/// sprite that holds an [`crate::draw::AnimationState`]. Called twice
+/// per `draw_frame` (world + gui). Lives at module scope rather than
+/// as a method so it can take `&mut [Sprite]` and `&[FrameStrip]`
+/// borrowed from disjoint pieces of `self` without fighting the borrow
+/// checker.
+///
+/// Defensive: an out-of-range `strip_id` falls back to the first strip
+/// and logs once per offender. Never panics on bad data.
+fn tick_animations(
+    sprites: &mut [Sprite],
+    strips: &[crate::draw::FrameStrip],
+    dt: f32,
+    animated_count: &mut u32,
+) {
+    if strips.is_empty() {
+        return;
+    }
+    for s in sprites.iter_mut() {
+        // Snapshot the strip lookup keys out of the (mut-borrowed) anim
+        // state so the borrow ends before we write to sibling fields of
+        // the Sprite. NLL would handle the overlapping disjoint-field
+        // case, but spelling it out keeps the loop body obvious.
+        let (strip_id, time) = match s.anim.as_mut() {
+            None => continue,
+            Some(anim) => {
+                if !anim.paused {
+                    anim.time += dt;
+                }
+                (anim.strip_id, anim.time)
+            }
+        };
+        *animated_count += 1;
+        let strip = if (strip_id as usize) < strips.len() {
+            &strips[strip_id as usize]
+        } else {
+            log::warn!(
+                "tick_animations: sprite has strip_id={} but only {} strip(s) registered; \
+                 falling back to strip 0",
+                strip_id, strips.len(),
+            );
+            &strips[0]
+        };
+        let idx = strip.frame_index_at(time);
+        s.uv_offset = strip.uv_offset_for(idx);
+        s.uv_scale = strip.frame_uv_scale;
     }
 }

@@ -7,10 +7,17 @@
 //! An on-screen FPS counter renders in the top-left via a tiny embedded
 //! bitmap font.
 //!
-//! Three textures:
+//! M7 scope: a handful of wolves are placed on the grid, each running a
+//! 2-frame idle from a 4-facing strip (SW/SE/NW/NE). Wolves stagger their
+//! playback time so they don't tick in lockstep. If `assets/wolf-all.png`
+//! is missing, the demo falls back to a procedural 2-frame silhouette so
+//! it always runs out-of-the-box.
+//!
+//! Four textures:
 //! * Tile diamond (procedural, 64×32) — 1024 tiles
 //! * Building 2×2 (procedural, taller than a tile so occlusion is visible)
 //! * Font atlas (embedded const, 16 glyphs in a horizontal strip)
+//! * Wolf spritesheet (15×16 cells of 64×64; or procedural 2-frame fallback)
 //!
 //! Renderer choice via `--renderer simple|batch|bigbuffer` CLI flag
 //! (passed through from `run.sh`). All three currently produce the same
@@ -22,14 +29,16 @@
 //! * `+` / `=`        — zoom in 10% (screen-centered).
 //! * `-` / `_`        — zoom out 10%.
 
+use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use anyhow::Result;
 use exey_engine::glam::Vec2;
 use exey_engine::{
-    depth_compare, Engine, EngineConfig, FrameClock, IsometricCamera2D, IsoSortable,
-    IsoBounds, RendererKind, Sprite, SpriteMesh, Texture, iso,
+    depth_compare, AnimationState, Engine, EngineConfig, FrameClock, FrameStrip,
+    IsometricCamera2D, IsoBounds, IsoSortable, LoopMode, RendererKind, Sprite, SpriteMesh,
+    Texture, iso,
 };
 use winit::application::ApplicationHandler;
 use winit::dpi::PhysicalPosition;
@@ -72,6 +81,27 @@ const ZOOM_MAX: f32 = 4.0;
 const MESH_TILE: u8 = 0;
 const MESH_BUILDING: u8 = 1;
 const MESH_FONT: u8 = 2;
+const MESH_WOLF: u8 = 3;
+
+// M7 — wolf-sheet layout. The asset (when present) is 960×1024 with
+// 15 columns × 16 rows of 64×64 cells. Rows 9–12 are idle, one row per
+// facing direction (SW/SE/NW/NE, in that order). For M7 we register 4
+// FrameStrips, each = first 2 frames of one of those rows.
+const WOLF_ATLAS_CELLS_X: u32 = 15;
+const WOLF_ATLAS_CELLS_Y: u32 = 16;
+const WOLF_CELL_PX: u32 = 64;
+const WOLF_IDLE_FRAME_COUNT: u32 = 2;
+const WOLF_IDLE_FPS: f32 = 2.5;
+/// Idle row per facing, in registry order.
+const WOLF_IDLE_ROWS: [u32; 4] = [9, 10, 11, 12]; // SW, SE, NW, NE
+
+/// How many wolves to scatter on the iso grid.
+const WOLF_COUNT: usize = 12;
+/// Wolf draw size on the grid, in world pixels. The atlas cells are
+/// 64×64 — same as `TILE_W` — so 1:1 keeps the wolf reading at tile
+/// scale. Tuned upward slightly so the silhouette is recognisable.
+const WOLF_SPRITE_W: f32 = 64.0;
+const WOLF_SPRITE_H: f32 = 64.0;
 
 /// CLI args. Tiny hand-rolled parser — pulling in `clap` for one flag is
 /// overkill at M2. Add more flags as the demo grows.
@@ -390,6 +420,197 @@ fn build_building_rgba(tile_w: u32, tile_h: u32, body_extra: u32) -> (u32, u32, 
     (base_w, height, rgba)
 }
 
+// =====================================================================
+// M7 — wolf spritesheet
+// =====================================================================
+
+/// Path to the real wolf spritesheet (CC-BY asset; not redistributed).
+/// If absent at runtime we fall back to a procedural 2-frame silhouette
+/// so the demo always runs out-of-the-box (a warning is logged).
+fn wolf_asset_path() -> PathBuf {
+    let mut p = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
+    p.push("assets");
+    p.push("wolf-all.png");
+    p
+}
+
+/// Build a tiny procedural 2-frame wolf-shaped silhouette atlas, used as
+/// a fallback when `assets/wolf-all.png` isn't on disk. We mimic the
+/// real sheet's 15×16 layout so the demo's `FrameStrip`s work without
+/// branching on which texture we got. The real sheet would have actual
+/// frames in rows 9–12; we only paint frame 0 and 1 of row 9 (SW idle)
+/// and leave the rest transparent. The other three facings reuse the
+/// same two cells via UV — they'll all look identical, but the animation
+/// still ticks, which is the M7 deliverable.
+///
+/// Returns RGBA bytes for a (15*64) × (16*64) atlas with luma-key-friendly
+/// near-black background.
+fn build_wolf_fallback_rgba() -> Vec<u8> {
+    let atlas_w = WOLF_ATLAS_CELLS_X * WOLF_CELL_PX; // 960
+    let atlas_h = WOLF_ATLAS_CELLS_Y * WOLF_CELL_PX; // 1024
+    let mut rgba = vec![0u8; (atlas_w * atlas_h * 4) as usize];
+
+    // Paint a wolf-ish silhouette into cell (row, col). Frame index drives
+    // a small breathing offset so the two idle frames read as different.
+    // The silhouette is approximate — body ellipse + head circle + four
+    // leg blocks + tail — at this resolution it just needs to read as
+    // "an animal" against the green tiles. Frame 0 is the rest pose;
+    // frame 1 lifts the back two legs and tucks the body 1px to suggest
+    // a breath.
+    let paint_cell = |rgba: &mut [u8], row: u32, col: u32, frame: u32| {
+        let cx = col * WOLF_CELL_PX;
+        let cy = row * WOLF_CELL_PX;
+        let breath = if frame == 0 { 0i32 } else { -1i32 };
+        // Body ellipse: centred slightly back and below mid-cell.
+        let body_cx = 30i32;
+        let body_cy = 36i32 + breath;
+        let body_a = 18i32; // semi-major (x)
+        let body_b = 10i32; // semi-minor (y)
+        // Head circle: in front-bottom-left (SW facing wolf looks down-left).
+        let head_cx = 14i32;
+        let head_cy = 34i32 + breath;
+        let head_r = 6i32;
+        // Legs: 4 vertical bars below the body.
+        let leg_y0 = 46i32 + breath;
+        let leg_y1 = 56i32;
+        let leg_xs = [16i32, 24i32, 34i32, 42i32];
+        // Frame 1 lifts back legs by 2px.
+        let leg_lift = [0i32, 0i32, if frame == 1 { 2 } else { 0 }, if frame == 1 { 2 } else { 0 }];
+        // Tail: short diagonal stub off the rear.
+        let tail_pts = [(48i32, 32i32), (50i32, 30i32), (52i32, 28i32)];
+
+        for py in 0..WOLF_CELL_PX as i32 {
+            for px in 0..WOLF_CELL_PX as i32 {
+                let mut hit = false;
+                // Body ellipse
+                let dx = px - body_cx;
+                let dy = py - body_cy;
+                if (dx * dx * body_b * body_b + dy * dy * body_a * body_a)
+                    <= (body_a * body_a * body_b * body_b)
+                {
+                    hit = true;
+                }
+                // Head
+                let hdx = px - head_cx;
+                let hdy = py - head_cy;
+                if hdx * hdx + hdy * hdy <= head_r * head_r {
+                    hit = true;
+                }
+                // Legs
+                for (i, lx) in leg_xs.iter().enumerate() {
+                    let ly0 = leg_y0 - leg_lift[i];
+                    let ly1 = leg_y1 - leg_lift[i];
+                    if px >= *lx - 1 && px <= *lx + 1 && py >= ly0 && py <= ly1 {
+                        hit = true;
+                    }
+                }
+                // Tail
+                for (tx, ty) in tail_pts.iter() {
+                    if (px - tx).abs() <= 1 && (py - ty).abs() <= 1 {
+                        hit = true;
+                    }
+                }
+                if hit {
+                    let x = cx as i32 + px;
+                    let y = cy as i32 + py;
+                    if x >= 0 && y >= 0 && (x as u32) < atlas_w && (y as u32) < atlas_h {
+                        let i = ((y as u32 * atlas_w + x as u32) * 4) as usize;
+                        // Dark slate, similar to the real asset's tone.
+                        rgba[i] = 60;
+                        rgba[i + 1] = 70;
+                        rgba[i + 2] = 80;
+                        rgba[i + 3] = 255;
+                    }
+                }
+            }
+        }
+    };
+
+    // Paint frame 0 and frame 1 into the SW idle row (row 9, cols 0..2)
+    // so registered strips against rows 9–12 col 0..2 will all sample
+    // these same two cells. Other rows stay fully transparent.
+    paint_cell(&mut rgba, 9, 0, 0);
+    paint_cell(&mut rgba, 9, 1, 1);
+    log::warn!(
+        "build_wolf_fallback_rgba — painted procedural fallback into row 9 cols 0..2; \
+         FrameStrips for rows 10/11/12 will sample transparent cells (wolves at those \
+         facings will be invisible until a real wolf-all.png is dropped in assets/)"
+    );
+
+    rgba
+}
+
+/// Load the wolf texture: try the real PNG/JPEG asset first, fall back
+/// to the procedural builder if it's missing or fails to decode. Always
+/// returns a texture sized as `(15*64)×(16*64)` so the demo's
+/// `FrameStrip`s work either way.
+fn build_wolf_texture(engine: &Engine) -> Result<Texture> {
+    let path = wolf_asset_path();
+    if path.exists() {
+        log::info!(
+            "build_wolf_texture — found asset at {} ; loading with luma-key alpha",
+            path.display()
+        );
+        match Texture::from_image_file_with_luma_key(&engine.instance, &engine.device, &path) {
+            Ok(tex) => {
+                // Sanity-check dimensions against our strip assumptions.
+                let expected_w = WOLF_ATLAS_CELLS_X * WOLF_CELL_PX;
+                let expected_h = WOLF_ATLAS_CELLS_Y * WOLF_CELL_PX;
+                if tex.width != expected_w || tex.height != expected_h {
+                    log::warn!(
+                        "build_wolf_texture — asset is {}x{} but FrameStrip math assumes {}x{} \
+                         ({} cells × {} cells of {} px). UV coords will be off; \
+                         consider re-exporting or updating WOLF_ATLAS_CELLS_* constants.",
+                        tex.width, tex.height, expected_w, expected_h,
+                        WOLF_ATLAS_CELLS_X, WOLF_ATLAS_CELLS_Y, WOLF_CELL_PX,
+                    );
+                }
+                return Ok(tex);
+            }
+            Err(e) => {
+                log::warn!(
+                    "build_wolf_texture — asset present but failed to decode: {e:#}; \
+                     falling back to procedural"
+                );
+            }
+        }
+    } else {
+        log::warn!(
+            "build_wolf_texture — asset not found at {} ; using procedural fallback. \
+             Drop the real wolf-all.png there for the proper sprite.",
+            path.display()
+        );
+    }
+    let rgba = build_wolf_fallback_rgba();
+    let w = WOLF_ATLAS_CELLS_X * WOLF_CELL_PX;
+    let h = WOLF_ATLAS_CELLS_Y * WOLF_CELL_PX;
+    Texture::from_rgba(&engine.instance, &engine.device, w, h, &rgba)
+}
+
+/// Tiny deterministic PRNG so wolf placement is reproducible across runs
+/// without pulling in `rand`. xorshift32, seeded with a constant.
+struct DemoRng(u32);
+impl DemoRng {
+    fn new(seed: u32) -> Self {
+        Self(seed | 1) // non-zero
+    }
+    fn next_u32(&mut self) -> u32 {
+        let mut x = self.0;
+        x ^= x << 13;
+        x ^= x >> 17;
+        x ^= x << 5;
+        self.0 = x;
+        x
+    }
+    fn range(&mut self, n: u32) -> u32 {
+        self.next_u32() % n.max(1)
+    }
+    fn unit(&mut self) -> f32 {
+        // Roughly uniform [0..1).
+        (self.next_u32() as f32) / (u32::MAX as f32)
+    }
+}
+
 struct Scene {
     // GPU resources (kept alive for the scene's lifetime).
     tile_mesh: SpriteMesh,
@@ -398,6 +619,11 @@ struct Scene {
     building_texture: Texture,
     font_mesh: SpriteMesh,
     font_texture: Texture,
+    /// M7 — wolf spritesheet + mesh. The mesh's UV space spans the full
+    /// atlas; per-sprite `uv_offset`/`uv_scale` are written each frame
+    /// by the engine's animation tick from the registered FrameStrips.
+    wolf_mesh: SpriteMesh,
+    wolf_texture: Texture,
 
     /// World sprites: tiles + buildings, sorted by the iso sorter each frame.
     world_sprites: Vec<Sprite>,
@@ -423,7 +649,7 @@ struct Scene {
 }
 
 impl Scene {
-    fn new(engine: &Engine) -> Result<Self> {
+    fn new(engine: &mut Engine) -> Result<Self> {
         log::info!(
             "Scene::new — building {GRID_W}×{GRID_H} iso grid + {BUILDING_COUNT} buildings",
         );
@@ -468,8 +694,39 @@ impl Scene {
             &font_texture,
         )?;
 
+        // -- M7: wolf texture + mesh + frame strip registry --
+        // The wolf atlas is shared GPU geometry just like the tile/font;
+        // wolves differ only in per-sprite uv_offset/uv_scale, which the
+        // engine writes each frame from their AnimationState.
+        let wolf_texture = build_wolf_texture(engine)?;
+        let wolf_mesh = SpriteMesh::unit_quad(
+            &engine.instance,
+            &engine.device,
+            &engine.render.sprite_pipeline,
+            &wolf_texture,
+        )?;
+        // Register one strip per facing. `wolf_strips[i]` is the strip_id
+        // for facing `i` in `WOLF_IDLE_ROWS` order (SW, SE, NW, NE).
+        let mut wolf_strips: [u16; 4] = [0; 4];
+        for (i, row) in WOLF_IDLE_ROWS.iter().enumerate() {
+            let strip = FrameStrip::from_grid_row(
+                WOLF_ATLAS_CELLS_X,
+                WOLF_ATLAS_CELLS_Y,
+                *row,
+                /*col0=*/ 0,
+                WOLF_IDLE_FRAME_COUNT,
+                WOLF_IDLE_FPS,
+                LoopMode::Loop,
+            );
+            wolf_strips[i] = engine.render.register_strip(strip);
+        }
+        log::info!(
+            "Scene::new — registered {} wolf idle strips (rows {:?}, {} frames each @ {:.1} fps)",
+            wolf_strips.len(), WOLF_IDLE_ROWS, WOLF_IDLE_FRAME_COUNT, WOLF_IDLE_FPS,
+        );
+
         // -- Build world: tiles in row-major, then buildings on random cells --
-        let mut world_sprites = Vec::with_capacity(GRID_W * GRID_H + BUILDING_COUNT);
+        let mut world_sprites = Vec::with_capacity(GRID_W * GRID_H + BUILDING_COUNT + WOLF_COUNT);
         for gy in 0..GRID_H {
             for gx in 0..GRID_W {
                 let g = Vec2::new(gx as f32, gy as f32);
@@ -519,6 +776,49 @@ impl Scene {
             );
         }
         log::info!("Scene::new — placed {BUILDING_COUNT} debug buildings");
+
+        // -- M7: scatter wolves on the iso grid --
+        // Random tile, random facing, staggered AnimationState.time so
+        // wolves don't all flip frame on the same tick. Footprint is 1×1
+        // (a single tile) so the iso sorter treats them like tile-scale
+        // characters. Anchor matches a tile's screen position; the sprite
+        // is drawn aligned to the tile's top corner (same pattern as the
+        // building anchor math, just at 1× scale).
+        let mut rng = DemoRng::new(0xC0FFEE);
+        for w in 0..WOLF_COUNT {
+            // Pick a grid cell. We don't bother de-duping against
+            // building footprints — at WOLF_COUNT=12 in a 32×32 grid
+            // the collision probability is negligible and visual overlap
+            // is actually a useful test for the sorter.
+            let gx = rng.range(GRID_W as u32) as usize;
+            let gy = rng.range(GRID_H as u32) as usize;
+            let facing = rng.range(4) as usize; // 0..3 → SW/SE/NW/NE
+            let time_offset = rng.unit() * (WOLF_IDLE_FRAME_COUNT as f32 / WOLF_IDLE_FPS);
+
+            let anchor = iso::logic_to_world(Vec2::new(gx as f32, gy as f32), TILE_H);
+            // Center the sprite horizontally on the tile's top corner;
+            // bias upward so the wolf's feet sit roughly on the tile's
+            // diamond center, not on its top vertex.
+            let pos = [
+                anchor.x - WOLF_SPRITE_W * 0.5,
+                anchor.y - (WOLF_SPRITE_H - TILE_H) * 0.5,
+            ];
+            let mut s = Sprite::new(pos, [WOLF_SPRITE_W, WOLF_SPRITE_H], [0.0, 0.0], [1.0, 1.0, 1.0, 1.0]);
+            // 1×1 iso footprint. The wolf's "front corner" for sorting
+            // is just the tile it stands on, shifted by 1 like other
+            // sprites — i.e. iso_grid is (gx+1, gy+1) so the wolf sorts
+            // in front of the tile it's drawn over.
+            s.iso_grid = [(gx + 1) as f32, (gy + 1) as f32];
+            s.iso_grid_size = [1.0, 1.0];
+            s.mesh_idx = MESH_WOLF;
+            s.anim = Some(AnimationState::with_offset(wolf_strips[facing], time_offset));
+            world_sprites.push(s);
+            log::info!(
+                "Scene::new — wolf {w} at grid=({gx},{gy}) facing={} time_offset={:.3}s",
+                ["SW", "SE", "NW", "NE"][facing], time_offset,
+            );
+        }
+        log::info!("Scene::new — placed {WOLF_COUNT} wolves");
 
         // -- Tile coordinate labels (static, built once) --
         // Each tile gets a "gx,gy" text label rendered as a GUI sprite on top.
@@ -574,6 +874,8 @@ impl Scene {
             building_texture,
             font_mesh,
             font_texture,
+            wolf_mesh,
+            wolf_texture,
             world_sprites,
             gui_sprites: Vec::new(),
             label_sprites,
@@ -657,6 +959,8 @@ impl Scene {
         self.building_texture.destroy(&engine.device);
         self.font_mesh.destroy(&engine.device);
         self.font_texture.destroy(&engine.device);
+        self.wolf_mesh.destroy(&engine.device);
+        self.wolf_texture.destroy(&engine.device);
     }
 }
 
@@ -719,7 +1023,7 @@ impl ApplicationHandler for App {
             }
         };
         println!("=== window created  inner_size={:?}", window.inner_size());
-        let engine = match Engine::new(&window, self.config.clone()) {
+        let mut engine = match Engine::new(&window, self.config.clone()) {
             Ok(e) => e,
             Err(e) => {
                 println!("=== Engine::new FAILED: {e:#}");
@@ -729,7 +1033,7 @@ impl ApplicationHandler for App {
             }
         };
         println!("=== Engine::new ok");
-        match Scene::new(&engine) {
+        match Scene::new(&mut engine) {
             Ok(scene) => self.scene = Some(scene),
             Err(e) => {
                 println!("=== Scene::new FAILED: {e:#}");
@@ -814,7 +1118,7 @@ impl ApplicationHandler for App {
                 handle_key(self.scene.as_mut(), ke);
             }
             WindowEvent::RedrawRequested => {
-                let _dt = self.clock.tick();
+                let dt = self.clock.tick();
                 // Rebuild the FPS overlay if the text changed (once per
                 // second-ish). The check is cheap; we do it every frame.
                 if let Some(scene) = self.scene.as_mut() {
@@ -831,15 +1135,27 @@ impl ApplicationHandler for App {
                         let order = engine.render.sorter.sort(&bounds);
                         log_sort_debug(&order, &scene.world_sprites);
                     }
-                    let scene = &*scene;
-                    let meshes: [&SpriteMesh; 3] =
-                        [&scene.tile_mesh, &scene.building_mesh, &scene.font_mesh];
+                    // Build the mesh array and capture the camera ref
+                    // *before* taking the two `&mut` borrows of the sprite
+                    // vecs. The borrow checker accepts this because every
+                    // field on Scene is a distinct memory location, and
+                    // we never overlap a shared borrow with a mutable one.
+                    let meshes: [&SpriteMesh; 4] = [
+                        &scene.tile_mesh,
+                        &scene.building_mesh,
+                        &scene.font_mesh,
+                        &scene.wolf_mesh,
+                    ];
+                    let camera = &scene.camera;
+                    let world: &mut [Sprite] = &mut scene.world_sprites;
+                    let gui: &mut [Sprite] = &mut scene.gui_sprites;
                     if let Err(e) = engine.draw_frame(
                         &window,
-                        &scene.camera,
+                        dt,
+                        camera,
                         &meshes,
-                        &scene.world_sprites,
-                        &scene.gui_sprites,
+                        world,
+                        gui,
                     ) {
                         log::error!("draw_frame: {e:#}");
                         event_loop.exit();
@@ -849,11 +1165,12 @@ impl ApplicationHandler for App {
                 // when the in-window overlay is off-screen during panning.
                 if self.last_fps_print.elapsed() >= Duration::from_millis(500) {
                     let title = format!(
-                        "IsometricWorldGenerator [{}]  {:.0} fps  ({} tiles + {} bldgs)",
+                        "IsometricWorldGenerator [{}]  {:.0} fps  ({} tiles + {} bldgs + {} wolves)",
                         self.config.renderer.as_str(),
                         self.clock.fps(),
                         GRID_W * GRID_H,
                         BUILDING_COUNT,
+                        WOLF_COUNT,
                     );
                     window.set_title(&title);
                     self.last_fps_print = Instant::now();

@@ -11,7 +11,7 @@ breaks the build between milestones.
 | M4  | `IsometricCamera2D` + iso math      | iso↔screen, world↔logic, ortho projection                                    | tiles laid out in iso projection                   | ✅ done |
 | M5  | `IsometricRectangleSorter` ★        | iso bounds, scanline + sorted lists, topological sort                        | depth correct with overlapping characters/decor    | ✅ done |
 | M6  | `BigBufferRenderer` ★               | 65k-cap streaming + state-change batching                                    | same scene, ~1 draw call                           | impl, untested |
-| M7  | `Animation2D`                        | frame manager, time-driven advance                                           | 2-frame idle on characters                         |       |
+| M7  | `Animation2D`                        | frame manager, time-driven advance                                           | 2-frame idle on characters                         | ✅ done |
 | M8  | TMX loader + writer                 | quick-xml + base64 + zlib roundtrip                                          | save/load `.tmx` with Tiled, openable in mapeditor |       |
 | M9  | Map generator                        | —                                                                            | random rooms+bridges, seedable, regen on key press |       |
 | M10 | A* pathfinding + click-to-walk      | input mapping, 4-conn A*                                                     | select character, click tile, walk path with indicators |       |

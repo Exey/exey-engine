@@ -186,11 +186,18 @@ pub struct Sprite {
     /// Which `SpriteMesh` (in the demo's mesh array) this sprite uses.
     /// Renderer rebinds mesh when this changes.
     pub mesh_idx: u8,
+    /// Optional animation playback state. `None` for static sprites
+    /// (tiles, buildings, UI text) — the engine's M7 frame-manager pass
+    /// skips them entirely so the per-frame cost stays proportional to
+    /// the count of *animated* sprites, not the total. When `Some`, the
+    /// engine resolves the strip's current frame each `draw_frame` and
+    /// overwrites this sprite's `uv_offset` / `uv_scale` accordingly.
+    pub anim: Option<crate::draw::AnimationState>,
 }
 
 impl Sprite {
     /// Constructor preserving the M3 API. Defaults iso fields to zero
-    /// (non-iso), uv to full, mesh_idx to 0.
+    /// (non-iso), uv to full, mesh_idx to 0, anim to None (static).
     pub fn new(pos: [f32; 2], size: [f32; 2], velocity: [f32; 2], tint: [f32; 4]) -> Self {
         Self {
             pos,
@@ -202,6 +209,7 @@ impl Sprite {
             uv_offset: [0.0, 0.0],
             uv_scale: [1.0, 1.0],
             mesh_idx: 0,
+            anim: None,
         }
     }
 }

@@ -318,6 +318,12 @@ pub struct RenderCore {
     /// Scratch buffer reused each frame for the iso bounds passed to
     /// the sorter. Kept here to avoid per-frame allocation.
     pub sort_bounds_scratch: Vec<sort::IsoBounds>,
+    /// M7 — registry of [`FrameStrip`](crate::draw::FrameStrip)s. The
+    /// demo registers strips at startup; per-sprite [`AnimationState`]s
+    /// reference entries by `strip_id`. The engine reads this each
+    /// `draw_frame` to resolve animated sprites' UVs; renderers do not
+    /// touch it.
+    pub frame_strips: Vec<crate::draw::FrameStrip>,
 }
 
 impl RenderCore {
@@ -336,7 +342,29 @@ impl RenderCore {
             // Cornflower blue. Easy to recognise, easy to spot stuck pipelines.
             clear_color: [0.39, 0.58, 0.93, 1.0],
             sort_bounds_scratch: Vec::new(),
+            frame_strips: Vec::new(),
         })
+    }
+
+    /// Register a frame strip and return its `strip_id` for use in
+    /// [`crate::draw::AnimationState::strip_id`]. Intended to be called
+    /// once per strip at scene setup. The returned id is just the index
+    /// in the registry; it stays valid for the engine's lifetime.
+    pub fn register_strip(&mut self, strip: crate::draw::FrameStrip) -> u16 {
+        let id = self.frame_strips.len();
+        assert!(
+            id < u16::MAX as usize,
+            "RenderCore::register_strip: too many strips (u16 id space exhausted)",
+        );
+        self.frame_strips.push(strip);
+        log::info!(
+            "RenderCore::register_strip — id={id} uv_offset=({:.4},{:.4}) frame_uv_scale=({:.4},{:.4}) \
+             frame_count={} fps={:.2} mode={:?}",
+            strip.uv_offset[0], strip.uv_offset[1],
+            strip.frame_uv_scale[0], strip.frame_uv_scale[1],
+            strip.frame_count, strip.fps, strip.loop_mode,
+        );
+        id as u16
     }
 
     pub fn destroy(&mut self, device: &Device) {

@@ -14,12 +14,14 @@
 //!                               built on a shared [`AbstractCamera2D`](render::camera::AbstractCamera2D).
 //! - [`render::iso`]             holds the iso ↔ logic ↔ world math —
 //!                               replaces AS3's `IsoUtil.spaceToScreen`.
+//! - [`draw::animation`]         M7: frame strips + per-sprite playback state
+//!                               (mirrors AS3 `draw.animation.*`).
 //!
-//! M4 scope: a 32×32 grid of iso-projected tiles, drawn through an
-//! `IsometricCamera2D` with auto-fit zoom and grid-centred position.
-//! No motion (no flock, no pan); the milestone proves the iso math and
-//! the camera plumbing. Depth sorting comes in M5; until then the grid
-//! is flat (no overlapping heights) so draw order is irrelevant.
+//! M7 scope: every animated sprite owns an `AnimationState` referring to a
+//! `FrameStrip` registered with `RenderCore::register_strip`. `Engine::draw_frame`
+//! takes `dt` and walks the sprite slices once per frame, resolving the
+//! strip's current frame into the sprite's `uv_offset` / `uv_scale`. The
+//! renderers stay animation-agnostic.
 
 #![forbid(unsafe_op_in_unsafe_fn)]
 
@@ -31,7 +33,7 @@ pub mod time;
 
 // Re-export the most-used types so demo code stays clean.
 pub use crate::core::{Engine, EngineConfig};
-pub use crate::draw::Vertex2D;
+pub use crate::draw::{AnimationState, FrameStrip, LoopMode, Vertex2D};
 pub use crate::gfx::Texture;
 pub use crate::render::{
     ICamera2D, IsometricCamera2D, RendererKind, SimpleCamera2D, Sprite, SpriteMesh,

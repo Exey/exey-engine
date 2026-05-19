@@ -138,6 +138,74 @@ impl Texture {
         Self::from_rgba(instance, device, w, h, img.as_raw())
     }
 
+    /// Load an image file (PNG, JPEG, …) from disk, promote near-black
+    /// pixels to fully transparent, and upload as RGBA.
+    ///
+    /// Why the alpha key: the wolf spritesheet ships as a JPEG with a
+    /// black background and no alpha channel. The sprite shader does
+    /// alpha blending, so we need actual transparency for the wolves
+    /// to read as cut-out characters on the tiles. A hard
+    /// `rgb == (0,0,0) → alpha 0` test would leave a 1–2px grey halo
+    /// from JPEG compression around every silhouette; a luma threshold
+    /// with a small ramp band hides that halo.
+    ///
+    /// Thresholds (in 0..255 luma space, ITU-R BT.601):
+    /// * `luma <= LUMA_KEY_LOW`  → alpha 0   (fully transparent)
+    /// * `luma >= LUMA_KEY_HIGH` → alpha 255 (fully opaque)
+    /// * in between → linearly ramped
+    ///
+    /// For pure-PNG inputs with an existing alpha channel, this path
+    /// is wrong (it would re-key already-transparent pixels and corrupt
+    /// the alpha). Use [`Self::from_png_bytes`] for those. We pick the
+    /// loader based on the *call site* in the demo — the user picks the
+    /// asset and the demo picks the loader.
+    pub fn from_image_file_with_luma_key(
+        instance: &Instance,
+        device: &Device,
+        path: &std::path::Path,
+    ) -> Result<Self> {
+        const LUMA_KEY_LOW: u32 = 8;
+        const LUMA_KEY_HIGH: u32 = 16;
+
+        log::info!("Texture::from_image_file_with_luma_key — opening {}", path.display());
+        let img = image::open(path)
+            .with_context(|| format!("failed to open image file: {}", path.display()))?
+            .to_rgba8();
+        let (w, h) = (img.width(), img.height());
+        let mut rgba = img.into_raw();
+
+        // Re-key alpha based on luma. Iterate as chunks of 4 bytes (RGBA).
+        // The existing alpha (255 from `to_rgba8` on a JPEG) is ignored;
+        // for PNGs with real alpha, prefer `from_png_bytes`.
+        let mut transparent = 0usize;
+        let mut ramp = 0usize;
+        let band = (LUMA_KEY_HIGH - LUMA_KEY_LOW).max(1);
+        for px in rgba.chunks_exact_mut(4) {
+            // BT.601 luma ≈ 0.299 R + 0.587 G + 0.114 B. Integer
+            // approximation with a /1000 divisor — accurate to ~0.1
+            // of a unit, far below our threshold of 8.
+            let luma = (299 * px[0] as u32 + 587 * px[1] as u32 + 114 * px[2] as u32) / 1000;
+            if luma <= LUMA_KEY_LOW {
+                px[3] = 0;
+                transparent += 1;
+            } else if luma >= LUMA_KEY_HIGH {
+                px[3] = 255;
+            } else {
+                // Ramp from 0 at LOW to 255 at HIGH.
+                let a = ((luma - LUMA_KEY_LOW) * 255) / band;
+                px[3] = a.min(255) as u8;
+                ramp += 1;
+            }
+        }
+        let total = (w as usize) * (h as usize);
+        log::info!(
+            "Texture::from_image_file_with_luma_key — {w}x{h}  {} fully transparent  {} in ramp  {} opaque  (luma keys {LUMA_KEY_LOW}..{LUMA_KEY_HIGH})",
+            transparent, ramp, total - transparent - ramp,
+        );
+
+        Self::from_rgba(instance, device, w, h, &rgba)
+    }
+
     pub fn destroy(&mut self, device: &Device) {
         unsafe {
             if self.sampler != vk::Sampler::null() {
